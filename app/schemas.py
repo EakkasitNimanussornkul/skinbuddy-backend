@@ -22,15 +22,17 @@ class QuizResultCreate(BaseModel):
     skinType: str
     scores: Dict[str, float] # Tells FastAPI to expect a JSON object of numbers
 
-class ShelfItemCreate(BaseModel):
-    brand: str
-    name: str           # Changed from product_name to match DB
-    category: str
-    status: str         # Changed from routine to match DB
-    opened_date: Optional[str] = None      # Added for DB
-    expiration_date: Optional[str] = None  # Added for DB
-
-class ShelfItemResponse(ShelfItemCreate):
+# --- NEW: Schema for Product Search ---
+class ProductResponse(BaseModel):
     id: str
-    user_id: str
-    created_at: str
+    brand: str
+    name: str
+    category: str
+    ingredients: Optional[str] = None
+
+# --- UPDATED: Schemas for the Shelf ---
+class ShelfItemCreate(BaseModel):
+    product_id: str  # Replaced brand, name, category with just the ID!
+    status: str
+    opened_date: Optional[str] = None
+    expiration_date: Optional[str] = None
