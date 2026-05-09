@@ -8,7 +8,11 @@ router = APIRouter()
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
-        response = supabase.table("shelf_items").select("*").eq("user_id", user_id).execute()
+        # MAGIC ALERT: "*, products(*)" fetches the shelf item AND the linked product details simultaneously!
+        response = supabase.table("shelf_items") \
+            .select("*, products(*)") \
+            .eq("user_id", user_id) \
+            .execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -19,12 +23,9 @@ async def add_to_shelf(
     user_id: str = Depends(get_current_user_id)
 ):
     try:
-        # UPDATED: Keys now perfectly match your Supabase columns!
         new_item = {
             "user_id": user_id,
-            "brand": item.brand,
-            "name": item.name,
-            "category": item.category,
+            "product_id": item.product_id, # Now we just save the ID!
             "status": item.status,
             "opened_date": item.opened_date,
             "expiration_date": item.expiration_date
