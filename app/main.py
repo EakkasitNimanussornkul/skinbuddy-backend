@@ -5,6 +5,7 @@ from app.api import health
 from app.api import auth
 from app.api import quiz
 from app.api import shelf
+from app.api import products
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -41,3 +42,4 @@ app.include_router(health.router, prefix="/health", tags=["Health"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(quiz.router, prefix="/quiz", tags=["Quiz"])
 app.include_router(shelf.router, prefix="/shelf", tags=["Shelf"])
+app.include_router(products.router, prefix="/products", tags=["Products"])
