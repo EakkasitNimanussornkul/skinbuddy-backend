@@ -3,8 +3,6 @@ from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
 from app.api import health
 from app.api import auth
-from app.api import floods
-from app.api import map
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -38,4 +36,5 @@ app.add_middleware(
 
 # Include the router
 app.include_router(health.router, prefix="/health", tags=["Health"])
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
     
