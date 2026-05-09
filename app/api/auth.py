@@ -1,70 +1,68 @@
-import os
-from fastapi import APIRouter, Depends, HTTPException
-from app.schemas import RegisterRequest, LoginRequest
-from sqlalchemy.orm import Session
-from supabase import create_client, Client
-
-# Import your database connection and models
-from app.db.connection import get_db
-from app.db.repository import user_repo
+from fastapi import APIRouter, HTTPException, Depends
+import httpx
+from app.schemas import LineAuthRequest
 from app.config.setting import settings
+from app.db.repository.user_repo import user_repo
+from app.core.services.token import create_supabase_compatible_token
+from app.db.connection import supabase
+from app.core.services.token import get_current_user_id
 
 router = APIRouter()
 
-supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-
-
-@router.post("/register")
-def register_user(request: RegisterRequest, db: Session = Depends(get_db)):
-    try:
-        # STEP A: Tell Supabase to create the secure Auth account
-        auth_response = supabase.auth.sign_up({
-            "email": request.email,
-            "password": request.password
-        })
-        
-        # Check if Supabase successfully created the user
-        if not auth_response.user:
-            raise HTTPException(status_code=400, detail="Failed to create user in Supabase")
-
-        # STEP B: Save the user to YOUR public.users table so you can attach apps to them!
-        new_user = user_repo.create_user(
-            db=db,
-            user_id=auth_response.user.id,
-            email=request.email,
-            username=request.username
+@router.post("/line")
+async def line_login(payload: LineAuthRequest):
+    # Step 1: Exchange the 'code' for a LINE Access Token
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(
+            "https://api.line.me/oauth2/v2.1/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": payload.code,
+                "redirect_uri": settings.LINE_REDIRECT_URI,
+                "client_id": settings.LINE_CHANNEL_ID,
+                "client_secret": settings.LINE_CHANNEL_SECRET,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
         
+        if token_response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to get LINE token")
         
-        return {"message": "User registered successfully!", "user_id": new_user.id}
+        line_access_token = token_response.json().get("access_token")
 
-    except Exception as e:
-        # If anything fails, return a clean error
-        raise HTTPException(status_code=400, detail=str(e))
-    
-# NEW: The Login Endpoint
-@router.post("/login")
-def login_user(request: LoginRequest):
-    try:
-        # Ask Supabase to verify the email and password
-        auth_response = supabase.auth.sign_in_with_password({
-            "email": request.email,
-            "password": request.password
-        })
-        
-        # If successful, extract the secure "wristband" (JWT)
-        session = auth_response.session
-        if not session:
-            raise HTTPException(status_code=401, detail="Invalid login credentials")
+        # Step 2: Get the User's Profile from LINE
+        profile_response = await client.get(
+            "https://api.line.me/v2/profile",
+            headers={"Authorization": f"Bearer {line_access_token}"}
+        )
+        line_data = profile_response.json()
 
-        # Return the token and the user's ID
-        return {
-            "message": "Login successful!",
-            "access_token": session.access_token,
-            "token_type": "bearer",
-            "user_id": auth_response.user.id
+    # Step 3: Save to Supabase (via our Repo)
+    db_user = user_repo.get_or_create_line_user(
+        line_id=line_data["userId"],
+        name=line_data["displayName"],
+        picture=line_data.get("pictureUrl", "")
+    )
+
+    if not db_user:
+        raise HTTPException(status_code=500, detail="Database error during user creation")
+
+    # Step 4: Issue the "Wristband" (Supabase JWT)
+    access_token = create_supabase_compatible_token(str(db_user["id"]))
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": db_user["id"],
+            "name": db_user["display_name"],
+            "avatar": db_user["picture_url"]
         }
-        
-    except Exception as e:
-        # Supabase will automatically throw an error if the password is wrong
-        raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+    }
+
+@router.get("/me")
+async def get_me(user_id: str = Depends(get_current_user_id)):
+    user = supabase.table("users").select("*").eq("id", user_id).execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user.data[0]
