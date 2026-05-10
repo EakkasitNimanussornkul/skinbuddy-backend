@@ -29,12 +29,17 @@ class ProductResponse(BaseModel):
     name: str
     category: str
     ingredients: Optional[str] = None
-    image_url: Optional[str] = None  # Added image 
+    image_url: Optional[str] = None  
 
-# If you ever create an endpoint to ADD products from the frontend, you'll need this too:
 class ProductCreate(BaseModel):
     brand: str
     name: str
     category: str
     ingredients: Optional[str] = None
-    image_url: Optional[str] = None  
+    image_url: Optional[str] = None 
+
+class ShelfItemCreate(BaseModel):
+    product_id: str  
+    status: str
+    opened_date: Optional[str] = None
+    expiration_date: Optional[str] = None
