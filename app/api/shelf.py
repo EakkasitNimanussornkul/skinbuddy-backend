@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from realtime import Optional
 from app.schemas import ShelfItemCreate
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
@@ -118,7 +119,7 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
 
 class ItemOpenRequest(BaseModel):
     opened_date: str
-    expiration_date: str
+    expiration_date: Optional[str] = None
 
 @router.patch("/{item_id}/open")
 async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = Depends(get_current_user_id)):
