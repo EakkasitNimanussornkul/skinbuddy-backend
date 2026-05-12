@@ -3,14 +3,15 @@ from app.schemas import ShelfItemCreate
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
 from app.schemas import AnalysisResponse, WarningAlert
+from pydantic import BaseModel
 router = APIRouter()
 
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
-        # MAGIC ALERT: "*, products(*)" fetches the shelf item AND the linked product details simultaneously!
+        # UPDATED: Now fetches shelf item -> product -> product_ingredients -> ingredients!
         response = supabase.table("shelf_items") \
-            .select("*, products(*)") \
+            .select("*, products(*, product_ingredients(ingredients(*)))") \
             .eq("user_id", user_id) \
             .execute()
         return response.data
@@ -28,7 +29,8 @@ async def add_to_shelf(
             "product_id": item.product_id, # Now we just save the ID!
             "status": item.status,
             "opened_date": item.opened_date,
-            "expiration_date": item.expiration_date
+            "expiration_date": item.expiration_date,
+            "pao": item.pao
         }
         
         response = supabase.table("shelf_items").insert(new_item).execute()
@@ -113,3 +115,18 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
     except Exception as e:
         print("Analysis Error:", e)
         raise HTTPException(status_code=500, detail="Failed to analyze product.")
+
+class ItemOpenRequest(BaseModel):
+    opened_date: str
+    expiration_date: str
+
+@router.patch("/{item_id}/open")
+async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = Depends(get_current_user_id)):
+    try:
+        response = supabase.table("shelf_items").update({
+            "opened_date": req.opened_date,
+            "expiration_date": req.expiration_date
+        }).eq("id", item_id).eq("user_id", user_id).execute()
+        return response.data[0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
