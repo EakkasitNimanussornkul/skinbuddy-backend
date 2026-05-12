@@ -41,6 +41,7 @@ class ShelfItemCreate(BaseModel):
     status: str
     opened_date: Optional[str] = None
     expiration_date: Optional[str] = None
+    pao: Optional[int] = None
 
 class Ingredient(BaseModel):
     id: str
