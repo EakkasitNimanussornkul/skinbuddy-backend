@@ -43,3 +43,18 @@ class ShelfItemCreate(BaseModel):
     status: str
     opened_date: Optional[str] = None
     expiration_date: Optional[str] = None
+
+class Ingredient(BaseModel):
+    id: str
+    name: str
+    benefits: Optional[str] = None
+    good_for: Optional[str] = None
+    bad_for: Optional[str] = None
+
+class ProductIngredient(BaseModel):
+    # This represents the bridge table. It holds the nested ingredient object.
+    ingredients: Ingredient
+
+class ProductDetail(ProductResponse): 
+    # Inherits id, brand, name, image_url from your existing ProductResponse!
+    product_ingredients: list[ProductIngredient] = []
