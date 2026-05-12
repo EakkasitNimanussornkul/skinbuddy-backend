@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
+from app.schemas import ProductDetail
 
 router = APIRouter()
 
@@ -22,3 +23,15 @@ async def search_products(q: str = "", user_id: str = Depends(get_current_user_i
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database search error: {str(e)}")
+@router.get("/{product_id}/deep", response_model=ProductDetail)
+async def get_product_deep_join(product_id: str):
+    try:
+        # THE MAGIC DEEP JOIN: 
+        # Notice the syntax: table(nested_table(nested_nested_table(*)))
+        response = supabase.table("products").select(
+            "*, product_ingredients(ingredients(*))"
+        ).eq("id", product_id).single().execute()
+        
+        return response.data
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
