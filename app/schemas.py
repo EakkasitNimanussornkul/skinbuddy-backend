@@ -63,3 +63,15 @@ class WarningAlert(BaseModel):
 class AnalysisResponse(BaseModel):
     is_safe: bool
     warnings: List[WarningAlert]
+
+class SharedIngredient(BaseModel):
+    id: str
+    name: str
+    benefits: Optional[str] = None
+
+class CompareResponse(BaseModel):
+    product_a: ProductDetail
+    product_b: ProductDetail
+    shared_ingredients: List[SharedIngredient]
+    similarity_score: float  # Percentage (0 to 100)
+    conflicts: List[WarningAlert]
