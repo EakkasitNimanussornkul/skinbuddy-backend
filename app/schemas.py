@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 class LineAuthRequest(BaseModel):
     code: str
@@ -17,12 +17,10 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: UserBase
 
-# --- NEW: Schema for the Quiz ---
 class QuizResultCreate(BaseModel):
     skinType: str
     scores: Dict[str, float] # Tells FastAPI to expect a JSON object of numbers
 
-# --- NEW: Schema for Product Search ---
 class ProductResponse(BaseModel):
     id: str
     brand: str
@@ -56,5 +54,12 @@ class ProductIngredient(BaseModel):
     ingredients: Ingredient
 
 class ProductDetail(ProductResponse): 
-    # Inherits id, brand, name, image_url from your existing ProductResponse!
     product_ingredients: list[ProductIngredient] = []
+class WarningAlert(BaseModel):
+    alert_type: str  # "Biological" or "Chemical"
+    severity: str    # "High", "Moderate", etc.
+    message: str
+
+class AnalysisResponse(BaseModel):
+    is_safe: bool
+    warnings: List[WarningAlert]
