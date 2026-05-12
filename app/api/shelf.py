@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.schemas import ShelfItemCreate
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
-
+from app.schemas import AnalysisResponse, WarningAlert
 router = APIRouter()
 
 @router.get("/")
@@ -47,3 +47,69 @@ async def delete_from_shelf(
         return {"message": "Item removed successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+@router.get("/analyze/{product_id}", response_model=AnalysisResponse)
+async def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
+    warnings = []
+
+    try:
+        # 1. Fetch User's Skin Type
+        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
+        user_skin_type = user_res.data.get("skin_type")
+        # 2. Fetch the Target Product's Ingredients
+        target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
+        target_ingredients = [item["ingredients"] for item in target_res.data.get("product_ingredients", [])]
+        target_ing_ids = [ing["id"] for ing in target_ingredients]
+        # CHECK 1: BIOLOGICAL (User Skin vs Product)
+        if user_skin_type:
+            for ing in target_ingredients:
+                # If the user's skin type is listed in the "bad_for" column
+                if ing.get("bad_for") and user_skin_type in ing.get("bad_for"):
+                    warnings.append(WarningAlert(
+                        alert_type="Biological",
+                        severity="Moderate",
+                        message=f"Personalized Alert: {ing['name']} may be too harsh for {user_skin_type} skin."
+                    ))
+
+        # CHECK 2: CHEMICAL (Shelf vs Product)
+        # Fetch the user's current shelf and all the ingredients inside those products
+        shelf_res = supabase.table("shelf_items").select("product_id, products(name, product_ingredients(ingredients(id, name)))").eq("user_id", user_id).execute()
+        
+        shelf_ing_ids = []
+        shelf_product_map = {} # Maps an ingredient ID to the product name on the shelf
+        
+        for item in shelf_res.data:
+            if not item.get("products"): continue
+            prod_name = item["products"]["name"]
+            for pi in item["products"].get("product_ingredients", []):
+                ing_id = pi["ingredients"]["id"]
+                shelf_ing_ids.append(ing_id)
+                shelf_product_map[ing_id] = prod_name
+        # If there are ingredients to compare, fetch the master rules
+        if target_ing_ids and shelf_ing_ids:
+            rules_res = supabase.table("conflict_rules").select("*").execute()
+        
+            for rule in rules_res.data:
+                a_id = rule["ingredient_a_id"]
+                b_id = rule["ingredient_b_id"]
+                # Scenario 1: Target has Ingredient A, Shelf has Ingredient B
+                if a_id in target_ing_ids and b_id in shelf_ing_ids:
+                    warnings.append(WarningAlert(
+                        alert_type="Chemical",
+                        severity=rule["severity"],
+                        message=f"Conflict with your {shelf_product_map[b_id]}: {rule['warning_message']}"
+                    ))
+                # Scenario 2: Target has Ingredient B, Shelf has Ingredient A
+                elif b_id in target_ing_ids and a_id in shelf_ing_ids:
+                    warnings.append(WarningAlert(
+                        alert_type="Chemical",
+                        severity=rule["severity"],
+                        message=f"Conflict with your {shelf_product_map[a_id]}: {rule['warning_message']}"
+                    ))
+        # Return the final report
+        return AnalysisResponse(
+            is_safe=len(warnings) == 0,
+            warnings=warnings
+        )
+    except Exception as e:
+        print("Analysis Error:", e)
+        raise HTTPException(status_code=500, detail="Failed to analyze product.")
