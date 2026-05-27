@@ -76,3 +76,11 @@ class CompareResponse(BaseModel):
     shared_ingredients: List[SharedIngredient]
     similarity_score: float  # Percentage (0 to 100)
     conflicts: List[WarningAlert]
+
+class ChatMessage(BaseModel):
+    role: str # 'user' or 'bot'
+    text: str
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage]
