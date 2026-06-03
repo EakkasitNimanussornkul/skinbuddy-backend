@@ -8,22 +8,19 @@ router = APIRouter()
 @router.get("/search")
 async def search_products(q: str = "", user_id: str = Depends(get_current_user_id)):
     try:
-        # If the search is empty, return an empty list
-        if not q:
-            return []
+        # Start building the database query
+        query = supabase.table("products").select("*")
+        
+        if q:
+            # If the user typed something, filter by name or brand
+            query = query.or_(f"name.ilike.%{q}%,brand.ilike.%{q}%")
             
-        # This searches for the query in BOTH the name and brand columns, ignoring capitalization (ilike)
-        # limit to 20 so the frontend dropdown doesn't lag
-        response = supabase.table("products") \
-            .select("*") \
-            .or_(f"name.ilike.%{q}%,brand.ilike.%{q}%") \
-            .limit(20) \
-            .execute()
+        # Execute the query (limit to 100 so we don't overload the frontend if the DB gets huge)
+        response = query.limit(100).execute()
             
         return response.data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database search error: {str(e)}")
-@router.get("/{product_id}/deep", response_model=ProductDetail)
+        raise HTTPException(status_code=500, detail=f"Database search error: {str(e)}")@router.get("/{product_id}/deep", response_model=ProductDetail)
 async def get_product_deep_join(product_id: str):
     try:
         # THE MAGIC DEEP JOIN: 
