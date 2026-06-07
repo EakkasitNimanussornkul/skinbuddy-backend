@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 import httpx
+from pydantic import BaseModel  
 from app.schemas import LineAuthRequest
 from app.config.setting import settings
 from app.db.repository.user_repo import user_repo
@@ -8,6 +9,9 @@ from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
 
 router = APIRouter()
+
+class UserUpdateRequest(BaseModel):
+    skin_type: str
 
 @router.post("/line")
 async def line_login(payload: LineAuthRequest):
@@ -66,3 +70,18 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
     if not user.data:
         raise HTTPException(status_code=404, detail="User not found")
     return user.data[0]
+
+# --- NEW: Express Skin Type Update Route ---
+@router.patch("/me")
+async def update_me(payload: UserUpdateRequest, user_id: str = Depends(get_current_user_id)):
+    try:
+        response = supabase.table("users").update({
+            "skin_type": payload.skin_type
+        }).eq("id", user_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="User not found or update failed")
+            
+        return response.data[0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
