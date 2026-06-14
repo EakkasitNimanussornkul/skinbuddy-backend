@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import APIRouter, HTTPException, Depends
 from app.schemas import ChatRequest
 from app.core.services import chat_service
@@ -17,4 +19,6 @@ async def chat_endpoint(
         return {"answer": bot_reply}
 
     except Exception as e:
+        # This will print the exact line number and error to your terminal!
+        traceback.print_exc() 
         raise HTTPException(status_code=500, detail=str(e))
