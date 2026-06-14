@@ -29,7 +29,7 @@ async def add_to_shelf(
         new_item = {
             "user_id": user_id,
             "product_id": item.product_id, 
-            "status": item.status,
+            "usage_state": item.usage_state, 
             "opened_date": item.opened_date,
             "expiration_date": item.expiration_date,
             "pao": item.pao
@@ -57,16 +57,13 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
     warnings = []
 
     try:
-        # 1. Fetch User's Skin Type
         user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
         user_skin_type = user_res.data.get("skin_type")
 
-        # 2. Fetch the Target Product's Ingredients
         target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
         target_ingredients = [item["ingredients"] for item in target_res.data.get("product_ingredients", [])]
         target_ing_ids = [ing["id"] for ing in target_ingredients]
 
-        # CHECK 1: BIOLOGICAL (User Skin vs Product)
         if user_skin_type:
             for ing in target_ingredients:
                 if ing.get("bad_for") and user_skin_type in ing.get("bad_for"):
@@ -76,9 +73,12 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
                         message=f"Personalized Alert: {ing['name']} may be too harsh for {user_skin_type} skin."
                     ))
 
-        # CHECK 2: CHEMICAL (Shelf vs Product)
-        shelf_res = supabase.table("shelf_items").select("product_id, products(name, product_ingredients(ingredients(id, name)))").eq("user_id", user_id).execute()
-        
+        shelf_res = supabase.table("shelf_items") \
+            .select("product_id, products(name, product_ingredients(ingredients(id, name)))") \
+            .eq("user_id", user_id) \
+            .eq("usage_state", "active") \
+            .execute()
+                
         shelf_ing_ids = []
         shelf_product_map = {} 
         

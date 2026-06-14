@@ -38,7 +38,7 @@ class ProductCreate(BaseModel):
 
 class ShelfItemCreate(BaseModel):
     product_id: str  
-    status: str
+    usage_state: str  
     opened_date: Optional[str] = None
     expiration_date: Optional[str] = None
     pao: Optional[int] = None
