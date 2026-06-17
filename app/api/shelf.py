@@ -138,6 +138,7 @@ class UpdateStatusRequest(BaseModel):
     usage_state: str
     outcome: Optional[str] = None  # Accepts: 'empty', 'discarded', 'expired'
     notes: Optional[str] = None    # User tracking reflection text
+    archived_at: Optional[str] = None # 
 
 @router.patch("/{item_id}/status")
 async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: str = Depends(get_current_user_id)):
@@ -151,11 +152,12 @@ async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: s
         if req.usage_state == "archived":
             update_data["archive_outcome"] = req.outcome
             update_data["archive_notes"] = req.notes
+            update_data["archived_at"] = req.archived_at 
         else:
             # If unarchiving (restoring to shelf), clear old log fields cleanly
             update_data["archive_outcome"] = None
             update_data["archive_notes"] = None
-
+            update_data["archived_at"] = None # 
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
         return response.data[0]
     except Exception as e:
