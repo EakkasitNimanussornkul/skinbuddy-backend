@@ -57,22 +57,40 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
     warnings = []
 
     try:
+        # Fetch User Profile
         user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type")
+        user_skin_type = user_res.data.get("skin_type") # e.g., "OSPW"
 
+        # Fetch Target Product Ingredients
         target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
-        target_ingredients = [item["ingredients"] for item in target_res.data.get("product_ingredients", [])]
+        
+        target_ingredients = []
+        if target_res.data and target_res.data.get("product_ingredients"):
+            target_ingredients = [item["ingredients"] for item in target_res.data["product_ingredients"] if item.get("ingredients")]
+            
         target_ing_ids = [ing["id"] for ing in target_ingredients]
 
+        # ---------------------------------------------------------
+        # PASS 1: BIOLOGICAL VERIFICATION (The Bug Fix)
+        # ---------------------------------------------------------
         if user_skin_type:
             for ing in target_ingredients:
-                if ing.get("bad_for") and user_skin_type in ing.get("bad_for"):
-                    warnings.append(WarningAlert(
-                        alert_type="Biological",
-                        severity="Moderate",
-                        message=f"Personalized Alert: {ing['name']} may be too harsh for {user_skin_type} skin."
-                    ))
+                bad_for_str = ing.get("bad_for")
+                if bad_for_str:
+                    # Loop through each letter (O, S, P, W)
+                    for letter in user_skin_type:
+                        # Check if "(S)" is inside "Sensitive (S), Very Dry (D)"
+                        if f"({letter})" in bad_for_str:
+                            warnings.append(WarningAlert(
+                                alert_type="Biological",
+                                severity="High",
+                                message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for your skin profile."
+                            ))
+                            break # Break inner loop to avoid double-warning for the same ingredient
 
+        # ---------------------------------------------------------
+        # PASS 2: CHEMICAL CONFLICT VERIFICATION
+        # ---------------------------------------------------------
         shelf_res = supabase.table("shelf_items") \
             .select("product_id, products(name, product_ingredients(ingredients(id, name)))") \
             .eq("user_id", user_id) \
