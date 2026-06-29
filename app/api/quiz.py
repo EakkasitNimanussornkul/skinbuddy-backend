@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.schemas import QuizResultCreate
 from app.db.connection import supabase
-from app.core.services.token import get_current_user_id # 🔑 The real decoder!
+from app.core.services.token import get_current_user_id
 
 router = APIRouter()
 
 @router.post("/save")
 async def save_quiz_results(
     quiz_data: QuizResultCreate,
-    user_id: str = Depends(get_current_user_id) # 🔒 This locks the endpoint perfectly!
+    user_id: str = Depends(get_current_user_id) 
 ):
     try:
         # 1. Insert into the quiz_results table

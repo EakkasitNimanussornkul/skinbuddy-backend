@@ -11,7 +11,7 @@ router = APIRouter()
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
-        # Fetch shelf item -> product -> product_ingredients -> ingredients!
+        # Fetch shelf item -> product -> product_ingredients
         response = supabase.table("shelf_items") \
             .select("*, products(*, product_ingredients(ingredients(*)))") \
             .eq("user_id", user_id) \
@@ -59,7 +59,7 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
     try:
         # Fetch User Profile
         user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type") # e.g., "OSPW"
+        user_skin_type = user_res.data.get("skin_type")
 
         # Fetch Target Product Ingredients
         target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
@@ -69,28 +69,18 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
             target_ingredients = [item["ingredients"] for item in target_res.data["product_ingredients"] if item.get("ingredients")]
             
         target_ing_ids = [ing["id"] for ing in target_ingredients]
-
-        # ---------------------------------------------------------
-        # PASS 1: BIOLOGICAL VERIFICATION (The Bug Fix)
-        # ---------------------------------------------------------
         if user_skin_type:
             for ing in target_ingredients:
                 bad_for_str = ing.get("bad_for")
                 if bad_for_str:
-                    # Loop through each letter (O, S, P, W)
                     for letter in user_skin_type:
-                        # Check if "(S)" is inside "Sensitive (S), Very Dry (D)"
                         if f"({letter})" in bad_for_str:
                             warnings.append(WarningAlert(
-                                alert_type="Biological",
+                                alert_type="Skin Type Conflict",
                                 severity="High",
-                                message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for your skin profile."
+                                message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for your skin type."
                             ))
-                            break # Break inner loop to avoid double-warning for the same ingredient
-
-        # ---------------------------------------------------------
-        # PASS 2: CHEMICAL CONFLICT VERIFICATION
-        # ---------------------------------------------------------
+                            break 
         shelf_res = supabase.table("shelf_items") \
             .select("product_id, products(name, product_ingredients(ingredients(id, name)))") \
             .eq("user_id", user_id) \
@@ -117,13 +107,13 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
 
                 if a_id in target_ing_ids and b_id in shelf_ing_ids:
                     warnings.append(WarningAlert(
-                        alert_type="Chemical",
+                        alert_type="Ingredients Conflict",
                         severity=rule["severity"],
                         message=f"Conflict with your {shelf_product_map[b_id]}: {rule['warning_message']}"
                     ))
                 elif b_id in target_ing_ids and a_id in shelf_ing_ids:
                     warnings.append(WarningAlert(
-                        alert_type="Chemical",
+                        alert_type="Ingredients Conflict",
                         severity=rule["severity"],
                         message=f"Conflict with your {shelf_product_map[a_id]}: {rule['warning_message']}"
                     ))
@@ -151,18 +141,15 @@ async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = De
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ── UPDATED SPECIFICALLY FOR THE ARCHIVE FORM METRICS ──
 class UpdateStatusRequest(BaseModel):
     usage_state: str
-    outcome: Optional[str] = None  # Accepts: 'empty', 'discarded', 'expired'
-    notes: Optional[str] = None    # User tracking reflection text
-    archived_at: Optional[str] = None # 
+    outcome: Optional[str] = None 
+    notes: Optional[str] = None    
+    archived_at: Optional[str] = None 
 
-# shelf.py - UPDATED
 @router.patch("/{item_id}/status")
 async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: str = Depends(get_current_user_id)):
     try:
-        # We now only care about the transition TO archived
         update_data = {
             "usage_state": req.usage_state
         }
@@ -171,8 +158,6 @@ async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: s
             update_data["archive_outcome"] = req.outcome
             update_data["archive_notes"] = req.notes
             update_data["archived_at"] = req.archived_at 
-        
-        # Logic to "nullify" or restore has been removed.
         
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
         return response.data[0]
