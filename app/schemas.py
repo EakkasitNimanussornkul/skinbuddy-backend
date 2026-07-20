@@ -49,6 +49,7 @@ class Ingredient(BaseModel):
     benefits: Optional[str] = None
     good_for: Optional[str] = None
     bad_for: Optional[str] = None
+    functional_group: Optional[str] = None
 
 class ProductIngredient(BaseModel):
     # This represents the bridge table. It holds the nested ingredient object.
