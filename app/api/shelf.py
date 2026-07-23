@@ -18,6 +18,7 @@ def normalize_text_accents(text: str) -> str:
         if unicodedata.category(c) != 'Mn'
     ).strip().lower()
 
+
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
@@ -25,9 +26,11 @@ async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
             .select("*, products(*, product_ingredients(ingredients(*)))") \
             .eq("user_id", user_id) \
             .execute()
+        
         return response.data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print("❌ GET /shelf/ Error:", str(e))
+        raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
 
 @router.post("/add")
 async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current_user_id)):
@@ -62,8 +65,12 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
         user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
         user_skin_type = user_res.data.get("skin_type") if user_res.data else None
 
-        # 2. Fetch Target Product Metadata
-        target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
+        # 2. Fetch Target Product Metadata (including ingredient_concerns)
+        target_res = supabase.table("products") \
+            .select("*, product_ingredients(ingredients(*))") \
+            .eq("id", product_id) \
+            .single() \
+            .execute()
         
         target_ingredients_ids = []
         target_groups = {}
@@ -76,7 +83,6 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
                     target_ingredients_ids.append(ing["id"])
                     target_ing_id_to_name[ing["id"]] = ing["name"]
                     
-                    # Accent Normalization Strategy applied to functional groups
                     fg = ing.get("functional_group")
                     if fg:
                         norm_fg = normalize_text_accents(fg)
@@ -127,7 +133,6 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
                 id_a = rule.get("ingredient_a_id")
                 id_b = rule.get("ingredient_b_id")
                 
-                # Check cross matching pairs
                 if id_a in target_ingredients_ids and id_b in shelf_ingredient_ids:
                     clashing_product = shelf_ingredient_ids[id_b]
                     warnings.append(WarningAlert(
@@ -178,15 +183,20 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
 class ItemOpenRequest(BaseModel):
     opened_date: str
     expiration_date: Optional[str] = None
+    pao: Optional[int] = None
 
 @router.patch("/{item_id}/open")
 async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = Depends(get_current_user_id)):
     try:
-        response = supabase.table("shelf_items").update({
+        update_data = {
             "opened_date": req.opened_date,
             "expiration_date": req.expiration_date,
-            "usage_state": "active"  # Flips state to active upon opening
-        }).eq("id", item_id).eq("user_id", user_id).execute()
+            "usage_state": "active"
+        }
+        if req.pao is not None:
+            update_data["pao"] = req.pao
+
+        response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
         return response.data[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
