@@ -76,13 +76,13 @@ async def resolve_product_record(identifier: str) -> dict or None:
     
     # 1. Check if identifier is a direct UUID
     if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', clean_id):
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", clean_id).single().execute()
+        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", clean_id).single().execute()
         if res.data:
             return res.data
 
     # 2. Check exact slug or normalized name matches across up to 2000 items
     clean_target = re.sub(r'[^a-z0-9]', '', clean_id)
-    res = supabase.table("products").select("*, product_ingredients(ingredients(*))").limit(2000).execute()
+    res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").limit(2000).execute()
     
     words = [w for w in clean_id.replace("-", " ").split() if len(w) > 2]
     
@@ -145,7 +145,7 @@ async def search_products(
         user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
         user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
 
-        query = supabase.table("products").select("*, product_ingredients(ingredients(*))")
+        query = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
         if q:
             clean_q = q.strip()
             query = query.or_(f"name.ilike.%{clean_q}%,brand.ilike.%{clean_q}%,category.ilike.%{clean_q}%")
