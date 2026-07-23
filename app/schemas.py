@@ -4,7 +4,6 @@ from typing import Optional, Dict, List
 class LineAuthRequest(BaseModel):
     code: str
 
-# Updated to match the frontend expectations!
 class UserBase(BaseModel):
     id: str
     name: str
@@ -43,6 +42,13 @@ class ShelfItemCreate(BaseModel):
     expiration_date: Optional[str] = None
     pao: Optional[int] = None
 
+class IngredientConcern(BaseModel):
+    id: str
+    concern_title: str
+    concern_description: Optional[str] = None
+    target_profile: Optional[str] = None
+    severity: Optional[str] = 'Moderate'
+
 class Ingredient(BaseModel):
     id: str
     name: str
@@ -50,6 +56,7 @@ class Ingredient(BaseModel):
     good_for: Optional[str] = None
     bad_for: Optional[str] = None
     functional_group: Optional[str] = None
+    ingredient_concerns: List[IngredientConcern] = []
 
 class ProductIngredient(BaseModel):
     # This represents the bridge table. It holds the nested ingredient object.
