@@ -2,8 +2,9 @@ import re
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.connection import supabase
-from app.core.services.token import get_current_user_id
+from app.core.services.token import get_current_user_id, get_optional_user_id
 from app.schemas import ProductDetail, CompareResponse, SharedIngredient, WarningAlert
+from app.core.services.token import get_optional_user_id
 
 router = APIRouter()
 
@@ -104,19 +105,27 @@ async def resolve_product_record(identifier: str) -> dict or None:
                 return prod
     return None
 
-# 🌟 HIGH-PRIORITY SLUG ROUTE 🌟
 @router.get("/slug/{slug}")
-async def get_product_by_slug(slug: str, user_id: str = Depends(get_current_user_id)):
+async def get_product_by_slug(
+    slug: str, 
+    user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 OPTIONAL AUTH DEPENDENCY
+):
     try:
-        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
+        user_skin_type = ""
+        if user_id:
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
+            user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
         
         prod = await resolve_product_record(slug)
         if prod:
             ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
-            match_info = compute_baumann_compatibility(user_skin_type, ings)
             
-            # 🌟 Fetch 4 Dynamic "Often Compared With" Recommendations 🌟
+            # 🌟 Only calculate match score if user is logged in
+            if user_skin_type:
+                match_info = compute_baumann_compatibility(user_skin_type, ings)
+            else:
+                match_info = {"score": None, "match_reasons": [], "caution_reasons": []}
+            
             cat = prod.get("category", "Moisturizer")
             sim_res = supabase.table("products").select("id, brand, name, image_url, price_thb, price_usd").eq("category", cat).neq("id", prod["id"]).limit(4).execute()
             similar_products = []
@@ -139,18 +148,19 @@ async def search_products(
     q: str = "", 
     min_price: Optional[int] = None, 
     max_price: Optional[int] = None, 
-    user_id: str = Depends(get_current_user_id)
+    user_id: Optional[str] = Depends(get_optional_user_id)
 ):
     try:
-        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
+        user_skin_type = ""
+        if user_id:
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
+            user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
 
         query = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
         if q:
             clean_q = q.strip()
             query = query.or_(f"name.ilike.%{clean_q}%,brand.ilike.%{clean_q}%,category.ilike.%{clean_q}%")
         
-        # 🌟 Price Range Filtering 🌟
         if min_price is not None:
             query = query.gte("price_thb", min_price)
         if max_price is not None:
@@ -164,7 +174,18 @@ async def search_products(
 
         for prod in products:
             ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
-            match_info = compute_baumann_compatibility(user_skin_type, ings)
+            
+            # 🌟 Only calculate personalized Baumann scores if user is authenticated
+            if user_skin_type:
+                match_info = compute_baumann_compatibility(user_skin_type, ings)
+                score = match_info["score"]
+                match_reasons = match_info["match_reasons"]
+                caution_reasons = match_info["caution_reasons"]
+            else:
+                score = None # Anonymous user
+                match_reasons = []
+                caution_reasons = []
+
             preview_names = [ing["name"] for ing in ings[:3]]
             prod_slug = create_slug(prod.get("brand", ""), prod.get("name", ""))
 
@@ -174,10 +195,10 @@ async def search_products(
 
             enriched_products.append({
                 **prod,
-                "skin_match_score": match_info["score"],
-                "match_reasons": match_info["match_reasons"],
-                "caution_reasons": match_info["caution_reasons"],
-                "has_conflict": len(match_info["caution_reasons"]) > 0,
+                "skin_match_score": score,
+                "match_reasons": match_reasons,
+                "caution_reasons": caution_reasons,
+                "has_conflict": len(caution_reasons) > 0,
                 "top_ingredients": preview_names,
                 "slug": prod_slug,
                 "_rank": rank_priority
