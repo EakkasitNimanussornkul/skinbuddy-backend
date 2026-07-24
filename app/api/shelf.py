@@ -1,22 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Optional, List  
+from typing import Optional, List
 from app.schemas import ShelfItemCreate
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
-from app.schemas import AnalysisResponse, WarningAlert
+from app.core.services import compatibility_service
+from app.schemas import AnalysisResponse
 from pydantic import BaseModel
-import unicodedata
 
 router = APIRouter()
-
-def normalize_text_accents(text: str) -> str:
-    """Transforms characters like Céramide into Ceramide to match core conflict engine constraints."""
-    if not text:
-        return ""
-    return "".join(
-        c for c in unicodedata.normalize('NFD', text)
-        if unicodedata.category(c) != 'Mn'
-    ).strip().lower()
 
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
@@ -55,122 +46,10 @@ async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_use
 
 @router.get("/analyze/{product_id}", response_model=AnalysisResponse)
 async def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
-    warnings = []
-
+    """Analyze a product against the user's ACTIVE shelf items (UC-06)."""
     try:
-        # 1. Fetch User Profile
-        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type") if user_res.data else None
-
-        # 2. Fetch Target Product Metadata
-        target_res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
-        
-        target_ingredients_ids = []
-        target_groups = {}
-        target_ing_id_to_name = {}
-        
-        if target_res.data and target_res.data.get("product_ingredients"):
-            for item in target_res.data["product_ingredients"]:
-                ing = item.get("ingredients")
-                if ing:
-                    target_ingredients_ids.append(ing["id"])
-                    target_ing_id_to_name[ing["id"]] = ing["name"]
-                    
-                    # Accent Normalization Strategy applied to functional groups
-                    fg = ing.get("functional_group")
-                    if fg:
-                        norm_fg = normalize_text_accents(fg)
-                        target_groups.setdefault(norm_fg, []).append(ing["name"])
-
-        # 3. Check Baumann Skin Type Direct Conflicts
-        if user_skin_type and target_res.data:
-            for item in target_res.data["product_ingredients"]:
-                ing = item.get("ingredients")
-                if ing:
-                    bad_for_str = ing.get("bad_for")
-                    if bad_for_str and any(f"({letter})" in bad_for_str for letter in user_skin_type):
-                        warnings.append(WarningAlert(
-                            alert_type="Skin Type Conflict",
-                            severity="High",
-                            message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for Baumann Type {user_skin_type}."
-                        ))
-
-        # 4. Fetch Opened Active Shelf Items
-        shelf_res = supabase.table("shelf_items") \
-            .select("product_id, products(name, product_ingredients(ingredients(id, name, functional_group)))") \
-            .eq("user_id", user_id) \
-            .eq("usage_state", "active") \
-            .execute()
-                
-        shelf_groups = {}
-        shelf_ingredient_ids = {} # Map: ingredient_id -> product_name
-        
-        for item in (shelf_res.data or []):
-            prod = item.get("products")
-            if not prod: continue
-            prod_name = prod["name"]
-            for pi in prod.get("product_ingredients", []):
-                ing = pi.get("ingredients")
-                if ing:
-                    shelf_ingredient_ids[ing["id"]] = prod_name
-                    if ing.get("functional_group"):
-                        norm_fg = normalize_text_accents(ing["functional_group"])
-                        shelf_groups.setdefault(norm_fg, []).append((prod_name, ing["name"]))
-
-        if not shelf_ingredient_ids and not shelf_groups:
-            return AnalysisResponse(is_safe=True, warnings=[])
-
-        # 5. PASS 1: Relational Ingredient-to-Ingredient Check (Reads conflict_rules table)
-        if target_ingredients_ids and shelf_ingredient_ids:
-            specific_rules = supabase.table("conflict_rules").select("*").execute()
-            for rule in (specific_rules.data or []):
-                id_a = rule.get("ingredient_a_id")
-                id_b = rule.get("ingredient_b_id")
-                
-                # Check cross matching pairs
-                if id_a in target_ingredients_ids and id_b in shelf_ingredient_ids:
-                    clashing_product = shelf_ingredient_ids[id_b]
-                    warnings.append(WarningAlert(
-                        alert_type="Chemical Interaction Warning",
-                        severity=rule["severity"].title(),
-                        message=f"Conflict with active {clashing_product}: Layering {target_ing_id_to_name[id_a]} directly alongside ingredients in your current routine triggers a structural clash. {rule['warning_message']}"
-                    ))
-                elif id_b in target_ingredients_ids and id_a in shelf_ingredient_ids:
-                    clashing_product = shelf_ingredient_ids[id_a]
-                    warnings.append(WarningAlert(
-                        alert_type="Chemical Interaction Warning",
-                        severity=rule["severity"].title(),
-                        message=f"Conflict with active {clashing_product}: Layering {target_ing_id_to_name[id_b]} directly alongside ingredients in your current routine triggers a structural clash. {rule['warning_message']}"
-                    ))
-
-        # 6. PASS 2: Structural Category Group Check (Reads category_conflict_rules table)
-        if target_groups and shelf_groups:
-            rules_res = supabase.table("category_conflict_rules").select("*").execute()
-            for rule in (rules_res.data or []):
-                rule_a = normalize_text_accents(rule.get("group_a"))
-                rule_b = normalize_text_accents(rule.get("group_b"))
-
-                if rule_a in target_groups and rule_b in shelf_groups:
-                    target_ing_names = ", ".join(target_groups[rule_a])
-                    for prod_name, shelf_ing_name in shelf_groups[rule_b]:
-                        warnings.append(WarningAlert(
-                            alert_type="Active Routine Clash",
-                            severity=rule["severity"].title(),
-                            message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {shelf_ing_name} is unadvised. {rule['warning_message']}"
-                        ))
-                elif rule_b in target_groups and rule_a in shelf_groups:
-                    target_ing_names = ", ".join(target_groups[rule_b])
-                    for prod_name, shelf_ing_name in shelf_groups[rule_a]:
-                        warnings.append(WarningAlert(
-                            alert_type="Active Routine Clash",
-                            severity=rule["severity"].title(),
-                            message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {shelf_ing_name} is unadvised. {rule['warning_message']}"
-                        ))
-
-        return AnalysisResponse(
-            is_safe=len(warnings) == 0,
-            warnings=warnings
-        )
+        comparison = compatibility_service.get_active_shelf_products(user_id)
+        return compatibility_service.analyze(product_id, user_id, comparison)
     except Exception as e:
         print("Analysis Error:", e)
         raise HTTPException(status_code=500, detail="Failed to analyze product compatibility.")
