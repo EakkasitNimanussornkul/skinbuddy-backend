@@ -129,7 +129,7 @@ class CompareResponse(BaseModel):
     shared_ingredients: List[SharedIngredient]
     similarity_score: float  # Percentage (0 to 100)
     conflicts: List[WarningAlert]
-
+# chatbot
 class ChatMessage(BaseModel):
     role: str # 'user' or 'bot'
     text: str
@@ -137,3 +137,42 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: List[ChatMessage]
+
+# routine
+class RoutineGenerateRequest(BaseModel):
+    followup_answers: str = ""
+
+class ProposedStep(BaseModel):
+    product_id: str
+    step_order: int
+    time_of_day: str = "both" # AM | PM | both
+    frequency: str = "daily" # daily | 3x_week | 2x_week | weekly
+
+class ApplyRoutineRequest(BaseModel):
+    steps: List[ProposedStep]
+
+class RoutineStepCreate(BaseModel):
+    product_id: str
+    frequency: str = "daily"
+    time_of_day: str = "both"
+    shelf_item_id: Optional[str] = None
+
+class FrequencyUpdateRequest(BaseModel):
+    frequency: str
+
+class ReorderRequest(BaseModel):
+    step_ids: List[str]
+
+class CompleteStepRequest(BaseModel):
+    period_key: Optional[str] = None
+
+# weekly skin log
+class SymptomEntry(BaseModel):
+    symptom: str
+    severity: int
+
+class SkinLogCreate(BaseModel):
+    symptoms: List[SymptomEntry]
+    affected_areas: List[str] = []
+    notes: Optional[str] = None
+    week_start: Optional[str] = None
