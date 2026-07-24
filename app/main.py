@@ -8,6 +8,7 @@ from app.api import shelf
 from app.api import products
 from app.api import chat
 from app.api import routine
+from app.api import analysis
 from app.api import notifications
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -48,4 +49,5 @@ app.include_router(shelf.router, prefix="/shelf", tags=["Shelf"])
 app.include_router(products.router, prefix="/products", tags=["Products"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(routine.router, prefix="/routine", tags=["Routine"])
+app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
