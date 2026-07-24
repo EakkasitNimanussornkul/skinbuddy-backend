@@ -113,3 +113,14 @@ class ReorderRequest(BaseModel):
 
 class CompleteStepRequest(BaseModel):
     period_key: Optional[str] = None
+
+# weekly skin log
+class SymptomEntry(BaseModel):
+    symptom: str
+    severity: int
+
+class SkinLogCreate(BaseModel):
+    symptoms: List[SymptomEntry]
+    affected_areas: List[str] = []
+    notes: Optional[str] = None
+    week_start: Optional[str] = None
