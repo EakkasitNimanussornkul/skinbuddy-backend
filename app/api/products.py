@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id, get_optional_user_id
 from app.schemas import ProductDetail, CompareResponse, SharedIngredient, WarningAlert
-from app.core.services.token import get_optional_user_id
+from app.core.services.ingredientcheck_service import calculate_safety_flags  # 🌟 ADDED IMPORT
 
 router = APIRouter()
 
@@ -97,7 +97,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
         if clean_target in [clean_prod, clean_name] or clean_prod in clean_target or clean_target in clean_prod:
             return prod
 
-    # 3. Fuzzy keyword match fallback (catches truncated DB strings like 'Essen')
+    # 3. Fuzzy keyword match fallback
     if words:
         for prod in (res.data or []):
             full_text = f"{prod.get('brand', '')} {prod.get('name', '')}".lower()
@@ -108,23 +108,24 @@ async def resolve_product_record(identifier: str) -> dict or None:
 @router.get("/slug/{slug}")
 async def get_product_by_slug(
     slug: str, 
-    user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 OPTIONAL AUTH DEPENDENCY
+    user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 Extracts logged-in user
 ):
     try:
         user_skin_type = ""
         if user_id:
-            user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-            user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).execute()
+            if user_res.data and len(user_res.data) > 0:
+                user_skin_type = user_res.data[0].get("skin_type", "")
         
         prod = await resolve_product_record(slug)
         if prod:
             ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
             
-            # 🌟 Only calculate match score if user is logged in
+            # 🌟 Compute compatibility score if skin type exists
             if user_skin_type:
                 match_info = compute_baumann_compatibility(user_skin_type, ings)
             else:
-                match_info = {"score": None, "match_reasons": [], "caution_reasons": []}
+                match_info = {"skin_match_score": None, "match_reasons": [], "caution_reasons": []}
             
             cat = prod.get("category", "Moisturizer")
             sim_res = supabase.table("products").select("id, brand, name, image_url, price_thb, price_usd").eq("category", cat).neq("id", prod["id"]).limit(4).execute()
@@ -132,9 +133,14 @@ async def get_product_by_slug(
             for sp in (sim_res.data or []):
                 similar_products.append({**sp, "slug": create_slug(sp.get("brand", ""), sp.get("name", ""))})
 
+            safety_flags = calculate_safety_flags(prod.get("product_ingredients", []))
+
             return {
                 **prod,
-                **match_info,
+                "skin_match_score": match_info.get("score"),
+                "match_reasons": match_info.get("match_reasons", []),
+                "caution_reasons": match_info.get("caution_reasons", []),
+                "safety_flags": safety_flags,
                 "slug": create_slug(prod.get("brand", ""), prod.get("name", "")),
                 "similar_products": similar_products
             }
@@ -142,6 +148,9 @@ async def get_product_by_slug(
         raise HTTPException(status_code=404, detail=f"Product matching slug '{slug}' not found.")
     except HTTPException as he: raise he
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+
+
 
 @router.get("/search")
 async def search_products(
@@ -175,14 +184,13 @@ async def search_products(
         for prod in products:
             ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
             
-            # 🌟 Only calculate personalized Baumann scores if user is authenticated
             if user_skin_type:
                 match_info = compute_baumann_compatibility(user_skin_type, ings)
                 score = match_info["score"]
                 match_reasons = match_info["match_reasons"]
                 caution_reasons = match_info["caution_reasons"]
             else:
-                score = None # Anonymous user
+                score = None
                 match_reasons = []
                 caution_reasons = []
 
@@ -193,11 +201,15 @@ async def search_products(
             if lower_q and lower_q in (prod.get("name") or "").lower(): rank_priority = 1
             elif lower_q and lower_q in (prod.get("brand") or "").lower(): rank_priority = 2
 
+            # 🌟 ATTACH DYNAMIC SAFETY FLAGS
+            safety_flags = calculate_safety_flags(prod.get("product_ingredients", []))
+
             enriched_products.append({
                 **prod,
                 "skin_match_score": score,
                 "match_reasons": match_reasons,
                 "caution_reasons": caution_reasons,
+                "safety_flags": safety_flags,
                 "has_conflict": len(caution_reasons) > 0,
                 "top_ingredients": preview_names,
                 "slug": prod_slug,
@@ -211,23 +223,49 @@ async def search_products(
         raise HTTPException(status_code=500, detail=f"Database search error: {str(e)}")
 
 @router.get("/compare", response_model=CompareResponse)
-async def compare_two_products(product_a_id: str, product_b_id: str):
+async def compare_two_products(
+    product_a_id: str, 
+    product_b_id: str,
+    user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 ADDED DEPENDENCY
+):
     try:
+        user_skin_type = ""
+        if user_id:
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).execute()
+            if user_res.data and len(user_res.data) > 0:
+                user_skin_type = user_res.data[0].get("skin_type", "")
+
         prod_a = await resolve_product_record(product_a_id)
         prod_b = await resolve_product_record(product_b_id)
 
         if not prod_a or not prod_b:
             raise HTTPException(status_code=404, detail="One or both products could not be resolved.")
 
-        ings_a = {item["ingredients"]["id"]: item["ingredients"] for item in prod_a.get("product_ingredients", []) if item.get("ingredients")}
-        ings_b = {item["ingredients"]["id"]: item["ingredients"] for item in prod_b.get("product_ingredients", []) if item.get("ingredients")}
+        # 🌟 COMPUTE compatibility scores for both Product A & Product B
+        ings_a = [item["ingredients"] for item in prod_a.get("product_ingredients", []) if item.get("ingredients")]
+        ings_b = [item["ingredients"] for item in prod_b.get("product_ingredients", []) if item.get("ingredients")]
 
-        set_a = set(ings_a.keys())
-        set_b = set(ings_b.keys())
+        if user_skin_type:
+            match_a = compute_baumann_compatibility(user_skin_type, ings_a)
+            match_b = compute_baumann_compatibility(user_skin_type, ings_b)
+            prod_a["skin_match_score"] = match_a.get("score")
+            prod_b["skin_match_score"] = match_b.get("score")
+        else:
+            prod_a["skin_match_score"] = None
+            prod_b["skin_match_score"] = None
+
+        prod_a["safety_flags"] = calculate_safety_flags(prod_a.get("product_ingredients", []))
+        prod_b["safety_flags"] = calculate_safety_flags(prod_b.get("product_ingredients", []))
+
+        dict_a = {item["ingredients"]["id"]: item["ingredients"] for item in prod_a.get("product_ingredients", []) if item.get("ingredients")}
+        dict_b = {item["ingredients"]["id"]: item["ingredients"] for item in prod_b.get("product_ingredients", []) if item.get("ingredients")}
+
+        set_a = set(dict_a.keys())
+        set_b = set(dict_b.keys())
 
         shared_ids = set_a.intersection(set_b)
         shared_ingredients = [
-            SharedIngredient(id=i, name=ings_a[i]["name"], benefits=ings_a[i].get("benefits")) 
+            SharedIngredient(id=i, name=dict_a[i]["name"], benefits=dict_a[i].get("benefits")) 
             for i in shared_ids
         ]
 
@@ -236,12 +274,12 @@ async def compare_two_products(product_a_id: str, product_b_id: str):
 
         conflicts = []
         groups_a = {}
-        for ing in ings_a.values():
+        for ing in dict_a.values():
             fg = ing.get("functional_group")
             if fg: groups_a.setdefault(fg.strip().lower(), []).append(ing["name"])
 
         groups_b = {}
-        for ing in ings_b.values():
+        for ing in dict_b.values():
             fg = ing.get("functional_group")
             if fg: groups_b.setdefault(fg.strip().lower(), []).append(ing["name"])
 
@@ -257,12 +295,6 @@ async def compare_two_products(product_a_id: str, product_b_id: str):
                         severity=rule["severity"],
                         message=f"Interaction between {', '.join(groups_a[rule_a])} ({rule['group_a']}) and {', '.join(groups_b[rule_b])} ({rule['group_b']}): {rule['warning_message']}"
                     ))
-                elif rule_b in groups_a and rule_a in groups_b:
-                    conflicts.append(WarningAlert(
-                        alert_type="Category Clash",
-                        severity=rule["severity"],
-                        message=f"Interaction between {', '.join(groups_a[rule_b])} ({rule['group_b']}) and {', '.join(groups_b[rule_a])} ({rule['group_a']}): {rule['warning_message']}"
-                    ))
 
         return CompareResponse(
             product_a=prod_a,
@@ -271,8 +303,15 @@ async def compare_two_products(product_a_id: str, product_b_id: str):
             similarity_score=round(similarity, 1),
             conflicts=conflicts
         )
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        print("Compare Error:", e)
-        raise HTTPException(status_code=400, detail="Failed to compare products.")
+    except HTTPException as he: raise he
+    except Exception as e: raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/{product_id}")
+async def get_product_detail(product_id: str):
+    res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
+    data = res.data
+    
+    if data:
+        data["safety_flags"] = calculate_safety_flags(data.get("product_ingredients", []))
+    
+    return data
