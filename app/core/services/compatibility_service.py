@@ -15,7 +15,7 @@ def normalize_text_accents(text: str) -> str:
     ).strip().lower()
 
 
-def _normalize_product(prod: dict) -> dict:
+def normalize_product(prod: dict) -> dict:
     """Flatten a Supabase products(...) join into { name, ingredients:[...] }."""
     ingredients = []
     for pi in prod.get("product_ingredients", []) or []:
@@ -38,7 +38,7 @@ def get_active_shelf_products(user_id: str) -> List[dict]:
     for item in (res.data or []):
         prod = item.get("products")
         if prod:
-            out.append(_normalize_product(prod))
+            out.append(normalize_product(prod))
     return out
 
 
@@ -67,7 +67,7 @@ def get_routine_products(user_id: str, exclude_product_id: Optional[str] = None)
             continue
         prod = item.get("products")
         if prod:
-            out.append(_normalize_product(prod))
+            out.append(normalize_product(prod))
     return out
 
 
@@ -88,7 +88,7 @@ def _build_comparison_maps(products: List[dict]):
 
 # --- Core analysis -----------------------------------------------------------
 
-def analyze(product_id: str, user_id: str, comparison_products: List[dict]) -> AnalysisResponse:
+def analyze(product_id: str, user_id: Optional[str], comparison_products: List[dict]) -> AnalysisResponse:
     """Run the full compatibility analysis of a target product against a set.
 
     Checks performed:
@@ -98,9 +98,11 @@ def analyze(product_id: str, user_id: str, comparison_products: List[dict]) -> A
     """
     warnings: List[WarningAlert] = []
 
-    # 1. User Baumann skin type
-    user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-    user_skin_type = user_res.data.get("skin_type") if user_res.data else None
+    # 1. User Baumann skin type (anonymous callers skip this check)
+    user_skin_type = None
+    if user_id:
+        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
+        user_skin_type = user_res.data.get("skin_type") if user_res.data else None
 
     # 2. Target product metadata
     target_res = (
