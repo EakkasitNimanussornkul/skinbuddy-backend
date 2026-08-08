@@ -2,6 +2,7 @@ import jwt
 from datetime import datetime, timedelta
 from typing import Optional
 from app.config.setting import settings
+from app.db.connection import supabase
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -38,6 +39,15 @@ def get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials] = De
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+def get_current_admin_user_id(user_id: str = Depends(get_current_user_id)) -> str:
+    """Admin-only gate. Looks up role fresh on every request - never trusts a
+    claim from the token itself - so revoking admin in the DB takes effect
+    immediately, and there's no role data in the JWT to tamper with."""
+    res = supabase.table("users").select("role").eq("id", user_id).single().execute()
+    if not res.data or res.data.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user_id
 
 def get_optional_user_id(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[str]:
     if not credentials:

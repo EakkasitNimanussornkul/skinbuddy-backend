@@ -68,6 +68,7 @@ async def line_login(payload: LineAuthRequest):
             "name": db_user["display_name"],
             "avatar": db_user["picture_url"],
             "skin_type": db_user.get("skin_type"),
+            "role": db_user.get("role", "user"),
         }
     }
 
