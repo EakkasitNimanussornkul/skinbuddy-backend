@@ -1,0 +1,88 @@
+{
+  "products": [
+    {
+      "name": "Hydrating Facial Cleanser",
+      "brand": "CeraVe",
+      "category": "Cleansers",
+      "image_url": null,
+      "description": "A daily, non-foaming face wash built around ceramides and hyaluronic acid, made for normal-to-dry skin that needs a clean feel without post-wash tightness.",
+      "price_thb": 450,
+      "price_usd": 15.00,
+      "ingredients": [
+        "Water", "Glycerin", "Cetearyl Alcohol", "Ceramide NP", "Ceramide AP", "Ceramide EOP", "Sodium Hyaluronate", "Cholesterol", "Phenoxyethanol"
+      ]
+    },
+    {
+      "name": "2% BHA Liquid Exfoliant",
+      "brand": "Paula's Choice",
+      "category": "Exfoliators",
+      "image_url": null,
+      "description": "A leave-on salicylic acid treatment that works inside the pore to clear out congestion, aimed at reducing blackheads and breakout-prone texture with regular use.",
+      "price_thb": 1150,
+      "price_usd": 34.00,
+      "ingredients": [
+        "Water", "Butylene Glycol", "Salicylic Acid", "Green Tea Extract", "Sodium Hydroxide", "Tetrasodium EDTA"
+      ]
+    },
+    {
+      "name": "Niacinamide 10% + Zinc 1%",
+      "brand": "The Ordinary",
+      "category": "Treatments",
+      "image_url": null,
+      "description": "A concentrated niacinamide and zinc serum for oil-prone, congestion-prone skin, intended to even out texture and support a more balanced complexion.",
+      "price_thb": 350,
+      "price_usd": 10.00,
+      "ingredients": [
+        "Water", "Niacinamide", "Pentylene Glycol", "Zinc PCA", "Xanthan Gum", "Phenoxyethanol"
+      ]
+    },
+    {
+      "name": "Glycolic Acid 7% Toning Solution",
+      "brand": "The Ordinary",
+      "category": "Toners",
+      "image_url": null,
+      "description": "A leave-on glycolic acid toner meant to lightly resurface the skin's top layer for a smoother, brighter-looking finish over time.",
+      "price_thb": 450,
+      "price_usd": 13.00,
+      "ingredients": [
+        "Water", "Glycolic Acid", "Glycerin", "Aloe Barbadensis Leaf Water", "Phenoxyethanol"
+      ]
+    },
+    {
+      "name": "Retinol 0.2% in Squalane",
+      "brand": "The Ordinary",
+      "category": "Treatments",
+      "image_url": null,
+      "description": "An anhydrous, squalane-based retinol treatment at an entry-level 0.2% concentration, meant for building tolerance while addressing early signs of aging.",
+      "price_thb": 350,
+      "price_usd": 10.00,
+      "ingredients": [
+        "Squalane", "Caprylic/Capric Triglyceride", "Retinol", "Jojoba Seed Oil", "Tomato Fruit Extract"
+      ]
+    },
+    {
+      "name": "Vitamin C Suspension 23% + HA Spheres 2%",
+      "brand": "The Ordinary",
+      "category": "Treatments",
+      "image_url": null,
+      "description": "A high-percentage, water-free L-ascorbic acid suspension paired with hyaluronic acid spheres, aimed at brightening and antioxidant support for dull-looking skin.",
+      "price_thb": 350,
+      "price_usd": 10.00,
+      "ingredients": [
+        "Ascorbic Acid", "Squalane", "Isodecyl Neopentanoate", "Coconut Alkanes", "Sodium Hyaluronate"
+      ]
+    },
+    {
+      "name": "Aloe Soothing Sun Cream SPF50",
+      "brand": "COSRX",
+      "category": "Sun Care",
+      "image_url": null,
+      "description": "A broad-spectrum SPF50 sunscreen built on an aloe base, designed to hydrate while shielding skin from daily UV exposure.",
+      "price_thb": 550,
+      "price_usd": 16.00,
+      "ingredients": [
+        "Water", "Ethylhexyl Methoxycinnamate", "Glycerin", "Propylene Glycol", "Dimethicone", "Titanium Dioxide", "Aloe Barbadensis Leaf Water"
+      ]
+    }
+  ]
+}
