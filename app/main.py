@@ -10,6 +10,7 @@ from app.api import chat
 from app.api import routine
 from app.api import analysis
 from app.api import notifications
+from app.api import submissions
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -51,3 +52,4 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(routine.router, prefix="/routine", tags=["Routine"])
 app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
+app.include_router(submissions.router, prefix="/submissions", tags=["Submissions"])

@@ -20,7 +20,8 @@ class UserBase(BaseModel):
     id: str
     name: str
     picture: Optional[str] = None  # User profile avatar URL
-    skin_type: Optional[str] = None 
+    skin_type: Optional[str] = None
+    role: Optional[str] = None
 
 class TokenResponse(BaseModel):
     message: Optional[str] = None
@@ -53,6 +54,7 @@ class Ingredient(BaseModel):
     good_for: Optional[str] = None
     bad_for: Optional[str] = None
     functional_group: Optional[str] = None
+    source: Optional[str] = None
     ingredient_concerns: List[IngredientConcern] = []
 
     class Config:
@@ -206,3 +208,17 @@ class SkinLogCreate(BaseModel):
     affected_areas: List[str] = []
     notes: Optional[str] = None
     week_start: Optional[str] = None
+
+# 11. PRODUCT SUBMISSION & ADMIN REVIEW SCHEMAS
+class ProductSubmissionCreate(BaseModel):
+    name: str
+    brand: str
+    category: str
+    description: Optional[str] = None
+    price_thb: Optional[float] = None
+    price_usd: Optional[float] = None
+    image_url: Optional[str] = None
+    ingredients: List[str]
+
+class ReviewDecision(BaseModel):
+    review_notes: Optional[str] = None
