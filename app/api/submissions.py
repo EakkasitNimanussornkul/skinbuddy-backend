@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +11,30 @@ from app.schemas import ProductSubmissionCreate, ReviewDecision
 router = APIRouter()
 
 
-@router.post("/")
+def load_pending_submission(submission_id: str) -> dict:
+    """Fetch a submission that is still awaiting review, or raise the right error.
+
+    Validates the id shape first: passing a non-UUID straight to Postgres raises
+    a type error that would otherwise surface as a confusing 500 instead of 404.
+    """
+    try:
+        uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # .limit(1) rather than .single(): .single() raises when there are no rows,
+    # which would turn a legitimate "not found" into a generic 500.
+    lookup = supabase.table("product_submissions").select("*").eq("id", submission_id).limit(1).execute()
+    if not lookup.data:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    submission = lookup.data[0]
+    if submission["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Submission has already been reviewed")
+    return submission
+
+
+@router.post("")
 async def create_submission(payload: ProductSubmissionCreate, user_id: str = Depends(get_current_user_id)):
     try:
         response = supabase.table("product_submissions").insert({
@@ -62,13 +86,8 @@ async def list_submissions_for_review(
 @router.post("/admin/{submission_id}/approve")
 async def approve_submission(submission_id: str, admin_id: str = Depends(get_current_admin_user_id)):
     try:
-        existing = supabase.table("product_submissions").select("*").eq("id", submission_id).single().execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Submission not found")
-        if existing.data["status"] != "pending":
-            raise HTTPException(status_code=400, detail="Submission has already been reviewed")
-
-        product_id = upsert_product_with_ingredients(existing.data["payload"])
+        submission = load_pending_submission(submission_id)
+        product_id = upsert_product_with_ingredients(submission["payload"])
 
         response = supabase.table("product_submissions").update({
             "status": "approved",
@@ -86,11 +105,7 @@ async def approve_submission(submission_id: str, admin_id: str = Depends(get_cur
 @router.post("/admin/{submission_id}/reject")
 async def reject_submission(submission_id: str, decision: ReviewDecision, admin_id: str = Depends(get_current_admin_user_id)):
     try:
-        existing = supabase.table("product_submissions").select("id, status").eq("id", submission_id).single().execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Submission not found")
-        if existing.data["status"] != "pending":
-            raise HTTPException(status_code=400, detail="Submission has already been reviewed")
+        load_pending_submission(submission_id)
 
         response = supabase.table("product_submissions").update({
             "status": "rejected",
