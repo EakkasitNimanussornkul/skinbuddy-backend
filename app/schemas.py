@@ -27,8 +27,6 @@ class QuizResultCreate(BaseModel):
 class IngredientConcern(BaseModel):
     id: Optional[str] = None
     concern_title: Optional[str] = None
-    concern_name: Optional[str] = None
-    name: Optional[str] = None
     concern_description: Optional[str] = None
     target_profile: Optional[str] = None
     severity: Optional[str] = 'Moderate'
@@ -43,8 +41,6 @@ class Ingredient(BaseModel):
     good_for: Optional[str] = None
     bad_for: Optional[str] = None
     functional_group: Optional[str] = None
-    safety_warning: Optional[str] = None
-    is_irritant: Optional[bool] = False
     ingredient_concerns: List[IngredientConcern] = []
 
     class Config:
@@ -52,14 +48,6 @@ class Ingredient(BaseModel):
 
 class ProductIngredient(BaseModel):
     ingredients: Ingredient
-
-    class Config:
-        from_attributes = True
-
-class ProductConcern(BaseModel):
-    id: Optional[str] = None
-    concern_name: Optional[str] = None
-    name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -102,7 +90,6 @@ class ProductDetail(ProductResponse):
     price_thb: Optional[float] = None
     price_usd: Optional[float] = None
     product_ingredients: List[ProductIngredient] = []
-    product_concerns: List[ProductConcern] = []
     concerns: Optional[List[str]] = []
     
     safety_flags: Optional[SafetyFlags] = None
