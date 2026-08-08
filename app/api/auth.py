@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 import httpx
-from pydantic import BaseModel  
-from app.schemas import LineAuthRequest
+from pydantic import BaseModel, field_validator
+from app.schemas import LineAuthRequest, validate_baumann_skin_type
 from app.config.setting import settings
 from app.db.repository.user_repo import user_repo
 from app.core.services.token import create_supabase_compatible_token
@@ -12,6 +12,8 @@ router = APIRouter()
 
 class UserUpdateRequest(BaseModel):
     skin_type: str
+
+    _validate_skin_type = field_validator("skin_type")(validate_baumann_skin_type)
 
 @router.post("/line")
 async def line_login(payload: LineAuthRequest):
@@ -39,6 +41,10 @@ async def line_login(payload: LineAuthRequest):
             "https://api.line.me/v2/profile",
             headers={"Authorization": f"Bearer {line_access_token}"}
         )
+
+        if profile_response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch LINE profile")
+
         line_data = profile_response.json()
 
     # Step 3: Save to Supabase (via our Repo)
