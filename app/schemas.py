@@ -1,5 +1,15 @@
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, field_validator
 from typing import Optional, Dict, List, Any
+
+# Baumann 16-Type code: one letter from each axis pair (O/D, S/R, P/N, W/T).
+_BAUMANN_PATTERN = re.compile(r"^[OD][SR][PN][WT]$")
+
+
+def validate_baumann_skin_type(v: str) -> str:
+    if not _BAUMANN_PATTERN.match(v):
+        raise ValueError("skin_type must be a 4-letter Baumann code, e.g. 'DSPT'")
+    return v
 
 # 1. AUTHENTICATION SCHEMAS
 
@@ -21,7 +31,9 @@ class TokenResponse(BaseModel):
 # 2. QUIZ & SKIN PROFILE SCHEMAS
 class QuizResultCreate(BaseModel):
     skinType: str
-    scores: Dict[str, float] 
+    scores: Dict[str, float]
+
+    _validate_skin_type = field_validator("skinType")(validate_baumann_skin_type)
 
 # 3. INGREDIENT & CONCERN SUB-MODELS
 class IngredientConcern(BaseModel):
