@@ -26,4 +26,5 @@ async def save_quiz_results(
         return {"message": "Quiz results saved successfully!"}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print("POST /quiz/save error:", e)
+        raise HTTPException(status_code=500, detail="Failed to save quiz results.")

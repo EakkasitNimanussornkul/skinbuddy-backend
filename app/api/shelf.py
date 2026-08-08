@@ -20,8 +20,8 @@ async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
         
         return response.data
     except Exception as e:
-        print("❌ GET /shelf/ Error:", str(e))
-        raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
+        print("GET /shelf/ error:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch shelf.")
 
 @router.post("/add")
 async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current_user_id)):
@@ -35,9 +35,10 @@ async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current
             "pao": item.pao
         }
         response = supabase.table("shelf_items").insert(new_item).execute()
-        return response.data[0] 
+        return response.data[0]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print("POST /shelf/add error:", e)
+        raise HTTPException(status_code=500, detail="Failed to add item to shelf.")
 
 @router.delete("/{item_id}")
 async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_user_id)):
@@ -45,7 +46,8 @@ async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_use
         supabase.table("shelf_items").delete().eq("id", item_id).eq("user_id", user_id).execute()
         return {"message": "Item removed successfully"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print("DELETE /shelf/{item_id} error:", e)
+        raise HTTPException(status_code=500, detail="Failed to remove item from shelf.")
 
 @router.get("/analyze/{product_id}", response_model=AnalysisResponse)
 async def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
@@ -75,7 +77,8 @@ async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = De
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
         return response.data[0]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print("PATCH /shelf/{item_id}/open error:", e)
+        raise HTTPException(status_code=500, detail="Failed to mark item as opened.")
 
 class UpdateStatusRequest(BaseModel):
     usage_state: str
@@ -97,4 +100,5 @@ async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: s
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
         return response.data[0]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print("PATCH /shelf/{item_id}/status error:", e)
+        raise HTTPException(status_code=500, detail="Failed to update item status.")
