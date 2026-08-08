@@ -20,13 +20,15 @@ def run_master_seed():
         print(f"❌ Missing Seeder File: {e}")
         return
 
-    # Only reset relationship/rule tables here - nothing else holds a foreign
-    # key into them. products/ingredients are upserted below instead of wiped:
-    # shelf_items/routine_steps hold real user data and FK-reference products,
-    # so deleting products would either fail outright or force deleting those
-    # user tables too - which a seed script must never do.
-    print("🧹 Resetting relationship/rule tables (catalog rows are upserted, not wiped)...")
-    supabase.table("product_ingredients").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    # conflict rules are reference data defined entirely by seed_conflict.json,
+    # so wiping and rebuilding them wholesale is correct - nothing else creates
+    # them and nothing holds a foreign key into them.
+    #
+    # products/ingredients are upserted below rather than wiped: shelf_items and
+    # routine_steps hold real user data and FK-reference products, so deleting
+    # products would either fail outright or force deleting those user tables
+    # too - which a seed script must never do.
+    print("🧹 Rebuilding conflict-rule tables (catalog rows are upserted, not wiped)...")
     supabase.table("conflict_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
     supabase.table("category_conflict_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
 
@@ -36,6 +38,12 @@ def run_master_seed():
 
     for prod in catalog_data["products"]:
         prod_id = upsert_product(prod)
+
+        # Clear this product's ingredient links only, never the whole table:
+        # products created outside this seeder (approved user submissions, the
+        # OBF ingest script) own their own links, and wiping globally would
+        # silently strip them without ever re-adding.
+        supabase.table("product_ingredients").delete().eq("product_id", prod_id).execute()
 
         for ing_name in prod["ingredients"]:
             if ing_name not in ingredient_id_map:
