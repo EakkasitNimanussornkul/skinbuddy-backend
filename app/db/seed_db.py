@@ -1,10 +1,42 @@
+import asyncio
 import os
 import sys
 import json
 
+import httpx
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from app.db.connection import supabase
 from app.core.services.catalog_service import upsert_product, upsert_ingredient
+from app.core.services.image_service import fetch_and_store_product_image
+from app.core.utils import create_slug
+
+
+async def resolve_catalog_images(products: list[dict]) -> None:
+    """Download each product's source image into our own Storage bucket.
+
+    Mutates products in place, setting image_url to the stored public URL.
+    source_image_url is where the picture came from; image_url is our copy, so
+    the catalog never hotlinks a third party (see 0004_create_product_images_bucket.sql).
+
+    fetch_and_store_product_image never raises and returns None on any failure,
+    so a product whose image cannot be fetched simply keeps image_url unset and
+    renders the frontend's placeholder.
+    """
+    pending = [p for p in products if p.get("source_image_url")]
+    if not pending:
+        return
+
+    print(f"🖼️  Storing product images ({len(pending)} with a source)...")
+    async with httpx.AsyncClient() as client:
+        for prod in pending:
+            slug = create_slug(prod["brand"], prod["name"])
+            stored_url = await fetch_and_store_product_image(client, prod["source_image_url"], slug)
+            if stored_url:
+                prod["image_url"] = stored_url
+                print(f"  ✅ {prod['brand']} - {prod['name']}")
+            else:
+                print(f"  ⚠️  Skipped {prod['brand']} - {prod['name']} (source unavailable or untrusted)")
 
 
 def run_master_seed():
@@ -33,6 +65,10 @@ def run_master_seed():
     supabase.table("category_conflict_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
 
     # 2. SEED GOLDEN CATALOG
+    # Images are resolved before the upsert loop so each product row is written
+    # once, already carrying its stored image_url.
+    asyncio.run(resolve_catalog_images(catalog_data["products"]))
+
     print("📦 Upserting Golden Catalog...")
     ingredient_id_map = {}
 

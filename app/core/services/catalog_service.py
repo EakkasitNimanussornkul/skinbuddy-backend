@@ -8,10 +8,18 @@ def upsert_product(prod: dict) -> str:
     its id across reseeds/approvals so shelf_items/routine_steps FKs never break."""
     prod_payload = {
         "name": prod["name"], "brand": prod["brand"], "category": prod["category"],
-        "image_url": prod.get("image_url"), "description": prod.get("description"),
+        "description": prod.get("description"),
         "price_thb": prod.get("price_thb"), "price_usd": prod.get("price_usd"),
         "slug": create_slug(prod["brand"], prod["name"]),
     }
+
+    # image_url is only written when we actually have one. Sending it
+    # unconditionally meant any caller without an image - a reseed from
+    # catalog.json, or an approved submission with no photo - would null out an
+    # image the product already had. Same guard ingest_catalog.py already uses.
+    if prod.get("image_url"):
+        prod_payload["image_url"] = prod["image_url"]
+
     existing = supabase.table("products").select("id").eq("brand", prod["brand"]).eq("name", prod["name"]).execute()
     if existing.data:
         product_id = existing.data[0]["id"]
