@@ -1,0 +1,133 @@
+"""Shared pytest fixtures and test-environment setup.
+
+IMPORTANT: the env vars below are set *before* anything under `app.` is
+imported. `app/config/setting.py` instantiates `Settings()` at import time and
+`app/db/connection.py` builds the Supabase client at import time, so by the time
+a test module runs, both are already frozen. Environment variables take priority
+over the `.env` file in pydantic-settings, so forcing dummy values here
+guarantees the test suite can never reach the real Supabase project even if a
+test forgets to patch something.
+"""
+
+import os
+
+os.environ.update({
+    "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
+    "SUPABASE_URL": "https://test-project.supabase.co",
+    "SUPABASE_ANON_KEY": "test-anon-key",
+    "SUPABASE_SERVICE_ROLE_KEY": "test-service-role-key",
+    "SUPABASE_JWT_SECRET": "test-jwt-secret-for-unit-tests-only",
+    "LINE_CHANNEL_ID": "test-channel-id",
+    "LINE_CHANNEL_SECRET": "test-channel-secret",
+    "LINE_REDIRECT_URI": "http://localhost:5173/callback",
+    "FRONTEND_URL": "http://localhost:5173",
+    "GEMINI_API_KEY": "test-gemini-key",
+})
+
+import pytest  # noqa: E402
+
+
+# --- Fake Supabase client ----------------------------------------------------
+#
+# The real client is a fluent builder: table(...).select(...).eq(...).execute().
+# The fake below accepts any chained call and returns canned rows keyed by table
+# name, so a test can describe the DB as a plain dict.
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+
+class FakeQuery:
+    def __init__(self, table_name, store):
+        self._table_name = table_name
+        self._store = store
+        self._single = False
+        self._filters = []   # (column, value, negated)
+        self._limit = None
+
+    # Filters the tests actually depend on are implemented for real; everything
+    # else (select/or_/gte/lte/order/...) is a no-op that continues the chain.
+    def eq(self, column, value):
+        self._filters.append((column, value, False))
+        return self
+
+    def neq(self, column, value):
+        self._filters.append((column, value, True))
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def single(self):
+        self._single = True
+        return self
+
+    def __getattr__(self, _name):
+        def _chain(*_args, **_kwargs):
+            return self
+        return _chain
+
+    def execute(self):
+        rows = list(self._store.get(self._table_name, []))
+        for column, value, negated in self._filters:
+            rows = [r for r in rows if (r.get(column) != value) == negated]
+        if self._limit is not None:
+            rows = rows[:self._limit]
+        if self._single:
+            # NOTE: the real .single() RAISES on zero rows rather than returning
+            # empty data. The fake is deliberately lenient here; tests that care
+            # about the zero-row path must exercise the real client.
+            return FakeResponse(rows[0] if rows else None)
+        return FakeResponse(rows)
+
+
+class FakeSupabase:
+    def __init__(self, store=None):
+        self.store = store or {}
+
+    def table(self, name):
+        return FakeQuery(name, self.store)
+
+
+@pytest.fixture
+def fake_supabase():
+    """Returns a factory: fake_supabase({"products": [...], "users": [...]})."""
+    return FakeSupabase
+
+
+@pytest.fixture
+def patch_supabase(monkeypatch):
+    """Patch the `supabase` name inside specific modules.
+
+    Every module does `from app.db.connection import supabase`, which binds the
+    client into that module's own namespace. Patching `app.db.connection.supabase`
+    would therefore have no effect — the already-imported modules keep their own
+    reference. Patch each consuming module by name instead.
+
+        patch_supabase({"products": rows}, "app.api.products")
+    """
+    def _patch(store, *module_paths):
+        import importlib
+
+        fake = FakeSupabase(store)
+        for path in module_paths:
+            module = importlib.import_module(path)
+            monkeypatch.setattr(module, "supabase", fake)
+        return fake
+
+    return _patch
+
+
+@pytest.fixture
+def client():
+    """FastAPI TestClient. Imported lazily so pure unit tests never pay the cost
+    of importing the whole app (which pulls in the LangChain/Gemini chat stack)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
