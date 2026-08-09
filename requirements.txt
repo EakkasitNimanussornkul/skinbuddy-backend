@@ -1,0 +1,19 @@
+# SkinBuddy backend — runtime dependencies.
+# Pinned to the versions the test suite is verified against (Python 3.11).
+#
+#   pip install -r requirements.txt
+#
+# Test-only packages live in requirements-dev.txt. See TESTING.md.
+
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+supabase==2.30.0
+httpx==0.28.1
+PyJWT==2.12.1
+python-dotenv==1.2.2
+
+# Chatbot / RAG
+langchain-core==1.4.7
+langchain-google-genai==4.2.5

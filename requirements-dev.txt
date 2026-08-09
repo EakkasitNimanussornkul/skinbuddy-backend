@@ -1,0 +1,9 @@
+# Test-only dependencies. Install alongside the runtime ones:
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# See TESTING.md for how to run the suite.
+
+-r requirements.txt
+
+pytest==9.1.1
