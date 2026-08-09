@@ -1,0 +1,72 @@
+{
+  "ingredient_conflicts": [
+    {
+      "ingredient_a": "Retinol",
+      "ingredient_b": "Salicylic Acid",
+      "severity": "high",
+      "warning_message": "Combining retinoids with BHA (Salicylic Acid) can cause severe dryness, peeling, and compromise the skin barrier. Use them on alternate nights."
+    },
+    {
+      "ingredient_a": "Ascorbic Acid",
+      "ingredient_b": "Salicylic Acid",
+      "severity": "medium",
+      "warning_message": "Layering pure Vitamin C (Ascorbic Acid) with strong chemical exfoliants like Salicylic Acid can significantly alter formula pH levels, leading to severe redness and irritation."
+    },
+    {
+      "ingredient_a": "Ascorbic Acid",
+      "ingredient_b": "Glycolic Acid",
+      "severity": "medium",
+      "warning_message": "Both are low-pH acids. Layering them simultaneously overloads the skin barrier, frequently resulting in stinging, localized peeling, and irritation."
+    },
+    {
+      "ingredient_a": "Niacinamide",
+      "ingredient_b": "Ascorbic Acid",
+      "severity": "low",
+      "warning_message": "Using high concentrations of Niacinamide and pure Ascorbic Acid simultaneously can occasionally cause short-term facial flushing in hyper-sensitive skin profiles."
+    },
+    {
+      "ingredient_a": "Retinol",
+      "ingredient_b": "Glycolic Acid",
+      "severity": "high",
+      "warning_message": "Simultaneous use increases cell turnover too aggressively, causing inflammation and moisture barrier breakdown. Apply on separate evenings."
+    },
+    {
+      "ingredient_a": "Retinol",
+      "ingredient_b": "Lactic Acid",
+      "severity": "high",
+      "warning_message": "Combining a retinoid with an alpha-hydroxy acid significantly increases skin sensitivity to external factors. Alternate your nightly applications."
+    },
+    {
+      "ingredient_a": "Benzoyl Peroxide",
+      "ingredient_b": "Ascorbic Acid",
+      "severity": "high",
+      "warning_message": "Benzoyl Peroxide is a strong oxidizing agent that can rapidly degrade Vitamin C (Ascorbic Acid), rendering the Vitamin C entirely useless."
+    },
+    {
+      "ingredient_a": "Benzoyl Peroxide",
+      "ingredient_b": "Retinol",
+      "severity": "high",
+      "warning_message": "Unless specifically encapsulated, Benzoyl Peroxide can deactivate retinoid molecules while heavily compounding skin dryness and flaking."
+    },
+    {
+      "ingredient_a": "Copper Tripeptide-1",
+      "ingredient_b": "Ascorbic Acid",
+      "severity": "medium",
+      "warning_message": "Pure Vitamin C can break down the structure of delicate copper peptides, neutralizing the anti-aging benefits of both ingredients."
+    }
+  ],
+  "category_conflicts": [
+    {
+      "category_a": "Retinoid",
+      "category_b": "Beta Hydroxy Acid (BHA)",
+      "severity": "high",
+      "warning_message": "Using retinoids alongside BHA exfoliants simultaneously frequently compromises the acid mantle. Alternate nights instead."
+    },
+    {
+      "category_a": "Retinoid",
+      "category_b": "Alpha Hydroxy Acid (AHA)",
+      "severity": "high",
+      "warning_message": "Using retinoids alongside AHA exfoliants simultaneously frequently compromises the acid mantle. Alternate nights instead."
+    }
+  ]
+}
