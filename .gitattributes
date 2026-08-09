@@ -1,0 +1,43 @@
+# Line-ending normalisation.
+#
+# Git stores LF in the repository and checks out each platform's native ending:
+# CRLF on Windows, LF on macOS and Linux. Without this file the behaviour
+# depends on every contributor's local core.autocrlf setting, so one person with
+# a different setting can commit CRLF and produce a diff where every line of a
+# file appears changed.
+#
+# The repository is already uniformly LF (verified with `git ls-files --eol`),
+# so adding this changes no stored content — it only keeps it that way.
+
+* text=auto
+
+# Explicit per-type rules so nothing depends on Git's content heuristic.
+*.py    text diff=python
+*.md    text
+*.txt   text
+*.json  text
+*.ini   text
+*.cfg   text
+*.toml  text
+*.sql   text
+*.yml   text
+*.yaml  text
+*.html  text
+*.css   text
+*.js    text
+
+# Shell scripts must stay LF even when checked out on Windows, or they fail to
+# execute under bash with a bad interpreter error.
+*.sh    text eol=lf
+
+# Binary: never convert, never diff as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.woff  binary
+*.woff2 binary
