@@ -144,10 +144,29 @@ def pytest_collection_modifyitems(items):
         }
 
 
+def _status(report):
+    """Normalise pytest's outcome into the five states the Test Record shows.
+
+    pytest reports an expected failure as `outcome == "skipped"` with a
+    `wasxfail` attribute holding the reason, so without this an xfail would be
+    recorded as an ordinary skip and the document would lose the fact that it
+    documents a known defect.
+
+    A strict XPASS — the handler got fixed and the test now passes — arrives as
+    `outcome == "failed"` with no `wasxfail`, so it correctly stays a failure:
+    that is the signal to remove the marker.
+    """
+    reason = getattr(report, "wasxfail", None)
+    if reason is None:
+        return report.outcome, ""
+    return ("xfail" if report.outcome == "skipped" else "xpass"), str(reason)
+
+
 def pytest_runtest_logreport(report):
     # "call" is the test body; a setup error still counts as a failed test.
     if report.when == "call" or (report.when == "setup" and report.outcome != "passed"):
         meta = _META.get(report.nodeid, {})
+        status, xfail_reason = _status(report)
         _RESULTS.append({
             "nodeid": report.nodeid,
             "file": report.nodeid.split("::")[0],
@@ -157,6 +176,8 @@ def pytest_runtest_logreport(report):
             "input_source": meta.get("input_source", ""),
             "assert_source": meta.get("assert_source", []),
             "outcome": report.outcome,
+            "status": status,
+            "xfail_reason": xfail_reason,
             "duration_s": round(report.duration, 4),
             "failure": str(report.longrepr) if report.outcome == "failed" else "",
         })
@@ -174,9 +195,11 @@ def pytest_sessionfinish(session, exitstatus):
         "exit_status": int(exitstatus),
         "totals": {
             "total": len(_RESULTS),
-            "passed": sum(r["outcome"] == "passed" for r in _RESULTS),
-            "failed": sum(r["outcome"] == "failed" for r in _RESULTS),
-            "skipped": sum(r["outcome"] == "skipped" for r in _RESULTS),
+            "passed": sum(r["status"] == "passed" for r in _RESULTS),
+            "failed": sum(r["status"] == "failed" for r in _RESULTS),
+            "skipped": sum(r["status"] == "skipped" for r in _RESULTS),
+            "xfailed": sum(r["status"] == "xfail" for r in _RESULTS),
+            "xpassed": sum(r["status"] == "xpass" for r in _RESULTS),
             "duration_s": round(sum(r["duration_s"] for r in _RESULTS), 3),
         },
         "results": _RESULTS,

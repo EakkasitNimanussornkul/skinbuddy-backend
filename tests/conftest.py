@@ -10,6 +10,7 @@ test forgets to patch something.
 """
 
 import os
+import uuid
 
 os.environ.update({
     "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
@@ -39,6 +40,11 @@ class FakeResponse:
         self.data = data
 
 
+# Postgres supplies these on insert. Fixed rather than "now" so a test that does
+# assert on them is deterministic.
+FAKE_TIMESTAMP = "2026-01-01T00:00:00+00:00"
+
+
 class FakeQuery:
     def __init__(self, table_name, store):
         self._table_name = table_name
@@ -46,9 +52,21 @@ class FakeQuery:
         self._single = False
         self._filters = []   # (column, value, negated)
         self._limit = None
+        # Write intent, resolved in execute(). These MUST be initialised here:
+        # __getattr__ answers unknown names with a chain function, so a missing
+        # attribute would read as truthy and silently misroute the dispatch
+        # below. __getattr__ now also raises for private names to make that
+        # failure loud rather than mysterious.
+        self._pending_insert = None
+        self._pending_update = None
+        self._pending_delete = False
 
     # Filters the tests actually depend on are implemented for real; everything
     # else (select/or_/gte/lte/order/...) is a no-op that continues the chain.
+    #
+    # select() in particular stays a no-op on purpose: the handlers pass
+    # PostgREST join strings like "*, products(*, product_ingredients(...))".
+    # The fake cannot resolve joins, so tests seed the already-joined shape.
     def eq(self, column, value):
         self._filters.append((column, value, False))
         return self
@@ -65,23 +83,70 @@ class FakeQuery:
         self._single = True
         return self
 
-    def __getattr__(self, _name):
+    def insert(self, payload):
+        # Real supabase-py takes a single row or a list of rows.
+        self._pending_insert = payload if isinstance(payload, list) else [payload]
+        return self
+
+    def update(self, payload):
+        self._pending_update = payload
+        return self
+
+    def delete(self):
+        self._pending_delete = True
+        return self
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            # Never answer a private name with the catch-all — see __init__.
+            raise AttributeError(name)
+
         def _chain(*_args, **_kwargs):
             return self
         return _chain
 
-    def execute(self):
-        rows = list(self._store.get(self._table_name, []))
+    def _matching(self, rows):
         for column, value, negated in self._filters:
             rows = [r for r in rows if (r.get(column) != value) == negated]
+        return rows
+
+    def execute(self):
+        if self._pending_insert is not None:
+            rows = self._store.setdefault(self._table_name, [])
+            inserted = []
+            for payload in self._pending_insert:
+                new_row = dict(payload)
+                # add_to_shelf returns this row straight to the caller, which
+                # needs the id to patch or delete the item later.
+                new_row.setdefault("id", str(uuid.uuid4()))
+                new_row.setdefault("created_at", FAKE_TIMESTAMP)
+                rows.append(new_row)
+                inserted.append(new_row)
+            return FakeResponse(inserted)
+
+        rows = self._store.get(self._table_name, [])
+        matched = self._matching(rows)
+
+        # Matched rows are the stored dicts themselves, so updating them in
+        # place is what makes the write observable via fake.store.
+        if self._pending_update is not None:
+            for row in matched:
+                row.update(self._pending_update)
+            return FakeResponse(matched)
+
+        if self._pending_delete:
+            for row in matched:
+                rows.remove(row)
+            return FakeResponse(matched)
+
         if self._limit is not None:
-            rows = rows[:self._limit]
+            matched = matched[:self._limit]
         if self._single:
             # NOTE: the real .single() RAISES on zero rows rather than returning
             # empty data. The fake is deliberately lenient here; tests that care
             # about the zero-row path must exercise the real client.
-            return FakeResponse(rows[0] if rows else None)
-        return FakeResponse(rows)
+            return FakeResponse(matched[0] if matched else None)
+        return FakeResponse(matched)
 
 
 class FakeSupabase:
@@ -119,6 +184,28 @@ def patch_supabase(monkeypatch):
         return fake
 
     return _patch
+
+
+@pytest.fixture
+def as_user():
+    """Authenticate every subsequent request as the given user id.
+
+        as_user("user-1")
+
+    Overrides the `get_current_user_id` dependency so the route runs its real
+    body instead of rejecting the request at the auth boundary (which
+    tests/api/test_auth_boundaries.py already covers). The override is removed
+    on teardown, so it cannot leak into another test.
+    """
+    from app.main import app
+    from app.core.services.token import get_current_user_id
+
+    def _as(user_id):
+        app.dependency_overrides[get_current_user_id] = lambda: user_id
+        return user_id
+
+    yield _as
+    app.dependency_overrides.pop(get_current_user_id, None)
 
 
 @pytest.fixture
