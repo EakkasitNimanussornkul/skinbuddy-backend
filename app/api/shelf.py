@@ -35,7 +35,13 @@ async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current
             "pao": item.pao
         }
         response = supabase.table("shelf_items").insert(new_item).execute()
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to add item to shelf.")
         return response.data[0]
+    except HTTPException:
+        # Without this the generic handler below would swallow the status above
+        # and answer 500 for every refusal.
+        raise
     except Exception as e:
         print("POST /shelf/add error:", e)
         raise HTTPException(status_code=500, detail="Failed to add item to shelf.")
@@ -43,8 +49,15 @@ async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current
 @router.delete("/{item_id}")
 async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_user_id)):
     try:
-        supabase.table("shelf_items").delete().eq("id", item_id).eq("user_id", user_id).execute()
+        response = supabase.table("shelf_items").delete().eq("id", item_id).eq("user_id", user_id).execute()
+        # An id that is unknown, or that belongs to someone else, matches no row.
+        # Reporting success there left the client unable to tell a refused delete
+        # from a real one, so its shelf list could drift out of sync silently.
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Shelf item not found.")
         return {"message": "Item removed successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         print("DELETE /shelf/{item_id} error:", e)
         raise HTTPException(status_code=500, detail="Failed to remove item from shelf.")
@@ -75,7 +88,14 @@ async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = De
             update_data["pao"] = req.pao
 
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
+        # No match means the item is unknown or owned by someone else. Indexing
+        # an empty list here used to raise IndexError into the handler below,
+        # answering 500 for a request that was correctly refused.
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Shelf item not found.")
         return response.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         print("PATCH /shelf/{item_id}/open error:", e)
         raise HTTPException(status_code=500, detail="Failed to mark item as opened.")
@@ -95,10 +115,21 @@ async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: s
         if req.usage_state == "archived":
             update_data["archive_outcome"] = req.outcome
             update_data["archive_notes"] = req.notes
-            update_data["archived_at"] = req.archived_at 
-        
+            update_data["archived_at"] = req.archived_at
+        else:
+            # Clear them on the way out. Leaving the previous archive values in
+            # place made an un-archived row read as an active item that also
+            # carried a completed archive record.
+            update_data["archive_outcome"] = None
+            update_data["archive_notes"] = None
+            update_data["archived_at"] = None
+
         response = supabase.table("shelf_items").update(update_data).eq("id", item_id).eq("user_id", user_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Shelf item not found.")
         return response.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         print("PATCH /shelf/{item_id}/status error:", e)
         raise HTTPException(status_code=500, detail="Failed to update item status.")
