@@ -25,6 +25,26 @@ def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
         "safety_flags": calculate_safety_flags(prod.get("product_ingredients", [])),
     }
 
+def compute_ingredient_similarity(ings_a: List[Dict[str, Any]], ings_b: List[Dict[str, Any]]) -> float:
+    """Jaccard similarity (0-100) over two products' ingredient ID sets.
+
+    Extracted from compare_two_products so the slug endpoint's "similar
+    products" ranking uses the same definition of similar, rather than growing
+    a second one that silently diverges.
+    """
+    ids_a = {ing["id"] for ing in ings_a if ing.get("id")}
+    ids_b = {ing["id"] for ing in ings_b if ing.get("id")}
+    union = ids_a | ids_b
+    if not union:
+        return 0.0
+    return round((len(ids_a & ids_b) / len(union)) * 100, 1)
+
+
+def ingredients_of(prod: dict) -> List[Dict[str, Any]]:
+    """Flatten a product_ingredients(ingredients(...)) join into a plain list."""
+    return [item["ingredients"] for item in prod.get("product_ingredients", []) or [] if item.get("ingredients")]
+
+
 def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Evaluates product ingredients against Baumann 16-Type combinations."""
     if not user_skin_type or len(user_skin_type) < 4:
@@ -140,11 +160,43 @@ async def get_product_by_slug(
         
         prod = await resolve_product_record(slug)
         if prod:
+            # "Similar products" is presented to the user as products "matched
+            # with similar active ingredient profiles", so it has to actually
+            # compare ingredients. It previously returned whichever four rows
+            # of the same category Supabase happened to hand back, with no
+            # ingredient data fetched at all.
+            #
+            # The category filter stays: ranking raw ingredient overlap across
+            # the whole catalogue would call a cleanser and a sunscreen similar
+            # for sharing water and glycerin. Rank within the category instead.
+            #
+            # The limit moves after the sort — scoring requires every candidate.
+            # Fine at this catalogue size; if a category ever grows into the
+            # hundreds this needs database-side ranking, not a larger limit.
             cat = prod.get("category", "Moisturizer")
-            sim_res = supabase.table("products").select("id, brand, name, image_url, price_thb, price_usd").eq("category", cat).neq("id", prod["id"]).limit(4).execute()
-            similar_products = []
+            base_ings = ingredients_of(prod)
+
+            sim_res = supabase.table("products").select(
+                "id, brand, name, image_url, price_thb, price_usd, product_ingredients(ingredients(*))"
+            ).eq("category", cat).neq("id", prod["id"]).execute()
+
+            candidates = []
             for sp in (sim_res.data or []):
-                similar_products.append({**sp, "slug": create_slug(sp.get("brand", ""), sp.get("name", ""))})
+                candidates.append({
+                    "id": sp.get("id"),
+                    "brand": sp.get("brand"),
+                    "name": sp.get("name"),
+                    "image_url": sp.get("image_url"),
+                    "price_thb": sp.get("price_thb"),
+                    "price_usd": sp.get("price_usd"),
+                    "slug": create_slug(sp.get("brand", ""), sp.get("name", "")),
+                    "ingredient_similarity": compute_ingredient_similarity(base_ings, ingredients_of(sp)),
+                })
+
+            # Ranks, does not filter: a zero-overlap product still appears
+            # rather than leaving the widget short.
+            candidates.sort(key=lambda c: c["ingredient_similarity"], reverse=True)
+            similar_products = candidates[:4]
 
             return {
                 **prod,
@@ -264,8 +316,9 @@ async def compare_two_products(
             for i in shared_ids
         ]
 
-        union_ids = set_a.union(set_b)
-        similarity = (len(shared_ids) / len(union_ids)) * 100 if union_ids else 0.0
+        # Same definition of "similar" the slug endpoint ranks by. dict_a/dict_b
+        # stay above: shared_ingredients reads names and benefits out of them.
+        similarity = compute_ingredient_similarity(list(dict_a.values()), list(dict_b.values()))
 
         # Full 3-pass check (skin-type + ingredient-pair + category rules), reusing the
         # same engine Shelf/Routine use instead of a partial category-only duplicate.
@@ -280,7 +333,7 @@ async def compare_two_products(
             product_a=prod_a,
             product_b=prod_b,
             shared_ingredients=shared_ingredients,
-            similarity_score=round(similarity, 1),
+            similarity_score=similarity,  # already rounded by compute_ingredient_similarity
             conflicts=conflicts
         )
     except HTTPException as he: raise he

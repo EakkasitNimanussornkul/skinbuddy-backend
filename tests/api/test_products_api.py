@@ -163,6 +163,104 @@ def test_compare_404s_when_a_product_cannot_be_resolved(client, patch_supabase):
     assert resp.status_code == 404
 
 
+# --- GET /products/slug/{slug} — similar products ----------------------------
+#
+# The widget tells the user these are "alternative formulations matched with
+# similar active ingredient profiles", so the ranking has to be real. Before
+# this, the endpoint returned whichever four same-category rows Supabase handed
+# back and fetched no ingredient data at all.
+#
+# The fake cannot resolve the product_ingredients(ingredients(*)) join, so each
+# candidate is seeded with the already-joined shape.
+
+SERUM_A_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+BASE_SERUM = product(SERUM_A_ID, "The Ordinary", "Base Serum", "Serum",
+                     [RETINOL, GLYCERIN, PHENOXY])
+# 3 of 3 shared -> 100.0
+TWIN = product("twin-id", "Brand T", "Twin Serum", "Serum", [RETINOL, GLYCERIN, PHENOXY])
+# 1 shared, union 4 -> 25.0
+PARTIAL = product("partial-id", "Brand P", "Partial Serum", "Serum", [RETINOL, SALICYLIC])
+# 0 shared -> 0.0
+DISJOINT = product("disjoint-id", "Brand D", "Disjoint Serum", "Serum", [SALICYLIC])
+# Same ingredients as the base, but a different category.
+OTHER_CATEGORY = product("cleanser-id", "Brand C", "Same Formula Cleanser", "Cleanser",
+                         [RETINOL, GLYCERIN, PHENOXY])
+
+
+def similar(resp):
+    return resp.json()["similar_products"]
+
+
+def test_slug_ranks_similar_products_by_ingredient_overlap(client, patch_supabase):
+    """Returns the same-category products ordered by descending ingredient
+    similarity — the twin formulation first, the partial overlap second, the
+    disjoint one last."""
+    patch_supabase({"products": [BASE_SERUM, DISJOINT, PARTIAL, TWIN]}, "app.api.products")
+
+    resp = client.get(f"/products/slug/{SERUM_A_ID}")
+    assert resp.status_code == 200
+
+    assert [s["name"] for s in similar(resp)] == \
+        ["Twin Serum", "Partial Serum", "Disjoint Serum"]
+
+
+def test_slug_reports_the_similarity_score_it_ranked_by(client, patch_supabase):
+    """Returns an ingredient_similarity percentage on each similar product:
+    100.0 for an identical ingredient set, 25.0 for one shared of four, and 0.0
+    for no overlap."""
+    patch_supabase({"products": [BASE_SERUM, DISJOINT, PARTIAL, TWIN]}, "app.api.products")
+
+    scores = {s["name"]: s["ingredient_similarity"] for s in similar(client.get(f"/products/slug/{SERUM_A_ID}"))}
+    assert scores == {"Twin Serum": 100.0, "Partial Serum": 25.0, "Disjoint Serum": 0.0}
+
+
+def test_slug_ranks_rather_than_filters(client, patch_supabase):
+    """Returns a product sharing no ingredients at all rather than excluding it,
+    so the widget is not left short when the catalogue has few close matches."""
+    patch_supabase({"products": [BASE_SERUM, DISJOINT]}, "app.api.products")
+
+    assert [s["name"] for s in similar(client.get(f"/products/slug/{SERUM_A_ID}"))] == ["Disjoint Serum"]
+
+
+def test_slug_keeps_similar_products_within_the_category(client, patch_supabase):
+    """Excludes a product with an identical ingredient set when it belongs to a
+    different category, so a cleanser is never offered as an alternative to a
+    serum however well its formula matches."""
+    patch_supabase({"products": [BASE_SERUM, OTHER_CATEGORY, PARTIAL]}, "app.api.products")
+
+    names = [s["name"] for s in similar(client.get(f"/products/slug/{SERUM_A_ID}"))]
+    assert "Same Formula Cleanser" not in names
+    assert names == ["Partial Serum"]
+
+
+def test_slug_never_lists_the_product_itself(client, patch_supabase):
+    """Excludes the product being viewed from its own similar-products list."""
+    patch_supabase({"products": [BASE_SERUM, TWIN]}, "app.api.products")
+
+    assert SERUM_A_ID not in [s["id"] for s in similar(client.get(f"/products/slug/{SERUM_A_ID}"))]
+
+
+def test_slug_returns_at_most_four_similar_products(client, patch_supabase):
+    """Returns no more than four similar products even when more candidates in
+    the category qualify."""
+    extras = [product(f"extra-{n}", "Brand E", f"Extra {n}", "Serum", [GLYCERIN])
+              for n in range(6)]
+    patch_supabase({"products": [BASE_SERUM, *extras]}, "app.api.products")
+
+    assert len(similar(client.get(f"/products/slug/{SERUM_A_ID}"))) == 4
+
+
+def test_slug_similar_products_carry_the_fields_the_widget_renders(client, patch_supabase):
+    """Returns id, brand, name, image_url, price and a generated slug on each
+    similar product, so the widget can render and link to it."""
+    patch_supabase({"products": [BASE_SERUM, TWIN]}, "app.api.products")
+
+    entry = similar(client.get(f"/products/slug/{SERUM_A_ID}"))[0]
+    assert {"id", "brand", "name", "image_url", "price_thb", "price_usd", "slug"} <= set(entry)
+    assert entry["slug"] == "brand-t-twin-serum"
+
+
 # --- Error-message hygiene ---------------------------------------------------
 
 def test_internal_errors_are_not_leaked_to_clients(client, monkeypatch):
