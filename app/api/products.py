@@ -6,6 +6,14 @@ from app.core.services.token import get_current_user_id, get_optional_user_id
 from app.schemas import ProductDetail, CompareResponse, SharedIngredient
 from app.core.services.ingredientcheck_service import calculate_safety_flags  # 🌟 ADDED IMPORT
 from app.core.services import compatibility_service
+# compute_ingredient_similarity now lives in compatibility_service.py, not
+# here - this module already imports compatibility_service above, and dupe
+# detection (compatibility_service.find_shelf_duplicates) needed this same
+# function, so defining it here and importing it back into compatibility_
+# service would be a circular import. Re-imported under its original name so
+# the two call sites below, and generate_test_record.py's GROUPS entry naming
+# it, don't change.
+from app.core.services.compatibility_service import compute_ingredient_similarity
 from app.core.utils import create_slug
 
 router = APIRouter()
@@ -24,21 +32,6 @@ def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
         "caution_reasons": caution_reasons,
         "safety_flags": calculate_safety_flags(prod.get("product_ingredients", [])),
     }
-
-def compute_ingredient_similarity(ings_a: List[Dict[str, Any]], ings_b: List[Dict[str, Any]]) -> float:
-    """Jaccard similarity (0-100) over two products' ingredient ID sets.
-
-    Extracted from compare_two_products so the slug endpoint's "similar
-    products" ranking uses the same definition of similar, rather than growing
-    a second one that silently diverges.
-    """
-    ids_a = {ing["id"] for ing in ings_a if ing.get("id")}
-    ids_b = {ing["id"] for ing in ings_b if ing.get("id")}
-    union = ids_a | ids_b
-    if not union:
-        return 0.0
-    return round((len(ids_a & ids_b) / len(union)) * 100, 1)
-
 
 def ingredients_of(prod: dict) -> List[Dict[str, Any]]:
     """Flatten a product_ingredients(ingredients(...)) join into a plain list."""

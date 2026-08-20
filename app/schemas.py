@@ -143,9 +143,24 @@ class WarningAlert(BaseModel):
     severity: str    # "High", "Moderate", "Low"
     message: str
 
+class DuplicateMatch(BaseModel):
+    product_id: str
+    name: str
+    brand: Optional[str] = None
+    slug: Optional[str] = None
+    similarity: float
+    shared_actives: List[str] = []
+
 class AnalysisResponse(BaseModel):
     is_safe: bool
     warnings: List[WarningAlert]
+    # Advisory only - never derived from or folded into is_safe/warnings above.
+    # A dupe is not a hazard; if it leaked into warnings it would flip is_safe
+    # to false and trip the frontend's blocking "unsafe, are you sure?" gate on
+    # AddProductModal.handleSave for the sole reason that the user owns
+    # something similar. Defaults to [] so every existing response_model=
+    # AnalysisResponse caller keeps working unchanged.
+    duplicates: List[DuplicateMatch] = []
 
 class SharedIngredient(BaseModel):
     id: str

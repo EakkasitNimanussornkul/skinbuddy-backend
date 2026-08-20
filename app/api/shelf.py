@@ -66,7 +66,32 @@ async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_use
 async def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
     try:
         comparison = compatibility_service.get_active_shelf_products(user_id)
-        return compatibility_service.analyze(product_id, user_id, comparison)
+        result = compatibility_service.analyze(product_id, user_id, comparison)
+
+        # Dupe detection ("you already own something like this") is computed
+        # here rather than inside analyze(), which is also called by the
+        # routine and product-compare paths - those don't want it, and adding
+        # a mode flag to analyze() for one caller isn't worth the complexity.
+        # It is advisory only and must never touch is_safe/warnings above.
+        target_res = (
+            supabase.table("products")
+            .select("category, product_ingredients(ingredients(id, name, functional_group))")
+            .eq("id", product_id)
+            .single()
+            .execute()
+        )
+        if target_res.data:
+            target_ingredients = [
+                item["ingredients"]
+                for item in (target_res.data.get("product_ingredients") or [])
+                if item.get("ingredients")
+            ]
+            dupe_shelf = compatibility_service.get_shelf_products_for_dupe_check(user_id)
+            result.duplicates = compatibility_service.find_shelf_duplicates(
+                product_id, target_ingredients, target_res.data.get("category"), dupe_shelf
+            )
+
+        return result
     except Exception as e:
         print("Shelf analysis error:", e)
         raise HTTPException(status_code=500, detail="Failed to analyze product compatibility.")

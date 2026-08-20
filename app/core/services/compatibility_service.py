@@ -1,8 +1,25 @@
 import unicodedata
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 from app.db.connection import supabase
-from app.schemas import AnalysisResponse, WarningAlert
+from app.schemas import AnalysisResponse, DuplicateMatch, WarningAlert
+
+# Functional groups that describe filler, not what a product actually does.
+# Plain ingredient-overlap similarity is useless for dupe detection without
+# this: water, glycerin and phenoxyethanol are in almost everything, so every
+# moisturiser would read as a dupe of every other moisturiser. Mirrors the
+# exclusion list already used by the frontend's KeyActivesGrid.vue, moved here
+# so both halves agree on one definition of "active".
+NON_ACTIVE_INGREDIENT_GROUPS = {"formulation stabilizer", "solvent", "vehicle"}
+
+# Calibrated 2026-08-20 against the seeded catalogue (app/db/seeders/catalog.json,
+# 7 products): the only category with more than one product is Treatments (3
+# products), whose 3 same-category pairs score 0.0, 0.0 and 16.7. Nothing
+# crosses this threshold, which is the correct outcome for a curated catalogue
+# of deliberately distinct hero products, not evidence the threshold is too
+# high. Re-check this once the catalogue has enough same-category near-repeats
+# to give the threshold a real positive example to test against.
+DUPE_SIMILARITY_THRESHOLD = 60.0
 
 
 def normalize_text_accents(text: str) -> str:
@@ -16,13 +33,65 @@ def normalize_text_accents(text: str) -> str:
 
 
 def normalize_product(prod: dict) -> dict:
-    """Flatten a Supabase products(...) join into { name, ingredients:[...] }."""
+    """Flatten a Supabase products(...) join into { name, ingredients:[...] },
+    plus id/brand/category/slug when the caller's select included them.
+
+    The extra keys are additive: dupe detection needs product identity (to
+    link back to it, exclude it from matching itself, and apply the
+    same-category constraint), but every existing caller - analyze(), via
+    _build_comparison_maps() - only ever reads name/ingredients, so this
+    changes nothing for them. A select that didn't fetch id/brand/category/
+    slug simply yields None for those keys, same as today.
+    """
     ingredients = []
     for pi in prod.get("product_ingredients", []) or []:
         ing = pi.get("ingredients")
         if ing:
             ingredients.append(ing)
-    return {"name": prod.get("name"), "ingredients": ingredients}
+    return {
+        "id": prod.get("id"),
+        "brand": prod.get("brand"),
+        "name": prod.get("name"),
+        "category": prod.get("category"),
+        "slug": prod.get("slug"),
+        "ingredients": ingredients,
+    }
+
+
+def compute_ingredient_similarity(ings_a: List[Dict[str, Any]], ings_b: List[Dict[str, Any]]) -> float:
+    """Jaccard similarity (0-100) over two products' ingredient ID sets.
+
+    Lives here rather than in app/api/products.py (which is where it was
+    originally written) because products.py imports this module - defining it
+    there and importing it back from here would be a circular import.
+    products.py imports it from here instead; see its compute_ingredient_similarity
+    re-export.
+    """
+    ids_a = {ing["id"] for ing in ings_a if ing.get("id")}
+    ids_b = {ing["id"] for ing in ings_b if ing.get("id")}
+    union = ids_a | ids_b
+    if not union:
+        return 0.0
+    return round((len(ids_a & ids_b) / len(union)) * 100, 1)
+
+
+def filter_active_ingredients(ingredients: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop filler ingredients so similarity reflects what a product actually does.
+
+    An ingredient with no functional_group is also excluded, not treated as an
+    active. ingredients.source records that many entries were guessed
+    heuristically from the name rather than curated (see
+    DOCUMENTATION_QUALITY_BRIEF.md) - an ungrouped ingredient is one the
+    system knows least about, and counting it as an active would inflate
+    similarity on the weakest data. This is the conservative choice, made
+    deliberately rather than left as an accident of the filter's shape.
+    """
+    out = []
+    for ing in ingredients:
+        group = (ing.get("functional_group") or "").strip().lower()
+        if group and group not in NON_ACTIVE_INGREDIENT_GROUPS:
+            out.append(ing)
+    return out
 
 
 def get_active_shelf_products(user_id: str) -> List[dict]:
@@ -40,6 +109,91 @@ def get_active_shelf_products(user_id: str) -> List[dict]:
         if prod:
             out.append(normalize_product(prod))
     return out
+
+
+def get_shelf_products_for_dupe_check(user_id: str) -> List[dict]:
+    """Comparison set for dupe detection: everything the user owns except what
+    they've archived.
+
+    Deliberately different from get_active_shelf_products(), which is
+    active-only (opened products, for conflict analysis - only an opened
+    product can clash with something else in a routine). An unopened backup is
+    still something already owned, and buying a third of it is exactly what
+    dupe detection should catch, so it stays in scope here. A sibling function
+    rather than a parameter on get_active_shelf_products(), so the existing
+    active-only behaviour analyze() depends on cannot be changed by accident.
+    """
+    res = (
+        supabase.table("shelf_items")
+        .select(
+            "products(id, brand, name, category, slug, "
+            "product_ingredients(ingredients(id, name, functional_group)))"
+        )
+        .eq("user_id", user_id)
+        .neq("usage_state", "archived")
+        .execute()
+    )
+    out = []
+    for item in (res.data or []):
+        prod = item.get("products")
+        if prod:
+            out.append(normalize_product(prod))
+    return out
+
+
+def find_shelf_duplicates(
+    target_id: str,
+    target_ingredients: List[Dict[str, Any]],
+    target_category: Optional[str],
+    shelf_products: List[dict],
+) -> List[DuplicateMatch]:
+    """Shelf products whose active ingredients substantially overlap the target's.
+
+    Advisory only. The caller must never fold this into `warnings` or let it
+    affect `is_safe` - see the AnalysisResponse.duplicates field docstring.
+
+    Restricted to the same category: two products from different categories
+    sharing an active (a cleanser and a serum both containing salicylic acid,
+    say) is not a redundant purchase - it's a possible over-exfoliation risk,
+    and analyze()'s category_conflict_rules pass already covers that. Keeping
+    the category constraint stops this feature from duplicating a warning the
+    system already gives elsewhere.
+    """
+    target_actives = filter_active_ingredients(target_ingredients)
+    if not target_actives:
+        return []
+
+    matches: List[DuplicateMatch] = []
+    for prod in shelf_products:
+        if not prod.get("id") or not prod.get("name"):
+            continue
+        if prod["id"] == target_id:
+            continue  # never report a product as its own dupe
+        if target_category and prod.get("category") != target_category:
+            continue
+
+        prod_actives = filter_active_ingredients(prod.get("ingredients", []))
+        if not prod_actives:
+            continue
+
+        score = compute_ingredient_similarity(target_actives, prod_actives)
+        if score < DUPE_SIMILARITY_THRESHOLD:
+            continue
+
+        shared = sorted(
+            {i["name"] for i in target_actives if i.get("name")}
+            & {i["name"] for i in prod_actives if i.get("name")}
+        )
+        matches.append(DuplicateMatch(
+            product_id=prod["id"],
+            name=prod["name"],
+            brand=prod.get("brand"),
+            slug=prod.get("slug"),
+            similarity=score,
+            shared_actives=shared,
+        ))
+
+    return sorted(matches, key=lambda m: m.similarity, reverse=True)
 
 
 def get_routine_products(user_id: str, exclude_product_id: Optional[str] = None) -> List[dict]:

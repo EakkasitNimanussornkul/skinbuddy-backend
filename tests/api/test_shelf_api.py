@@ -7,11 +7,14 @@ is not repeated here.
 Two patch targets are in play, and mixing them up silently breaks the tests:
 
   app.api.shelf                          for the handlers that query directly
-  app.core.services.compatibility_service for /analyze, which delegates entirely
+  app.core.services.compatibility_service for conflict analysis + dupe detection
 
-`analyze_product_compatibility` never touches `supabase` itself — it calls
-compatibility_service, which holds its own module-level reference. Patching
-`app.api.shelf` for that route would leave the real client in place.
+Most `/analyze` tests patch **both**: the route now queries `supabase`
+directly itself (the target product's category, for dupe scoping) in addition
+to delegating to compatibility_service for everything else. Patching only one
+of the two leaves the other module's `supabase` as the real client, which
+tries to reach the network and fails loudly rather than silently — a good
+signal if a new test forgets one.
 
 The Supabase select strings here are PostgREST joins the fake cannot resolve
 (`products(name, product_ingredients(ingredients(...)))`), so the seeded rows
@@ -144,7 +147,7 @@ def test_analyze_surfaces_a_conflict_with_an_active_shelf_product(client, patch_
     as_user("user-1")
     patch_supabase(
         analysis_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)]),
-        "app.core.services.compatibility_service",
+        "app.core.services.compatibility_service", "app.api.shelf",
     )
 
     resp = client.get("/shelf/analyze/prod-retinol")
@@ -163,7 +166,7 @@ def test_analyze_ignores_shelf_items_that_are_not_active(client, patch_supabase,
             shelf_row("item-1", "user-1", "active", GLYCERIN_PRODUCT),
             shelf_row("item-2", "user-1", "wishlist", BHA_PRODUCT),
         ]),
-        "app.core.services.compatibility_service",
+        "app.core.services.compatibility_service", "app.api.shelf",
     )
 
     resp = client.get("/shelf/analyze/prod-retinol")
@@ -180,7 +183,7 @@ def test_analyze_ignores_another_users_active_shelf_items(client, patch_supabase
             shelf_row("item-1", "user-1", "active", GLYCERIN_PRODUCT),
             shelf_row("item-2", "user-2", "active", BHA_PRODUCT),
         ]),
-        "app.core.services.compatibility_service",
+        "app.core.services.compatibility_service", "app.api.shelf",
     )
 
     resp = client.get("/shelf/analyze/prod-retinol")
@@ -189,14 +192,15 @@ def test_analyze_ignores_another_users_active_shelf_items(client, patch_supabase
 
 
 def test_analyze_reports_safe_when_the_shelf_is_empty(client, patch_supabase, as_user):
-    """Returns is_safe=True and no warnings when the caller has no active shelf
-    items to compare the target product against."""
+    """Returns is_safe=True, no warnings and an empty duplicates list — present
+    as [], not omitted — when the caller has no shelf items to compare the
+    target product against."""
     as_user("user-1")
-    patch_supabase(analysis_store([]), "app.core.services.compatibility_service")
+    patch_supabase(analysis_store([]), "app.core.services.compatibility_service", "app.api.shelf")
 
     resp = client.get("/shelf/analyze/prod-retinol")
     assert resp.status_code == 200
-    assert resp.json() == {"is_safe": True, "warnings": []}
+    assert resp.json() == {"is_safe": True, "warnings": [], "duplicates": []}
 
 
 def test_analyze_does_not_leak_internal_errors(client, patch_supabase, as_user, monkeypatch):
@@ -206,7 +210,7 @@ def test_analyze_does_not_leak_internal_errors(client, patch_supabase, as_user, 
     import app.core.services.compatibility_service as compat_module
 
     as_user("user-1")
-    patch_supabase(analysis_store([]), "app.core.services.compatibility_service")
+    patch_supabase(analysis_store([]), "app.core.services.compatibility_service", "app.api.shelf")
 
     def explode(*_a, **_k):
         raise RuntimeError("connection string postgres://user:hunter2@db.internal")
@@ -217,6 +221,258 @@ def test_analyze_does_not_leak_internal_errors(client, patch_supabase, as_user, 
     assert resp.status_code == 500
     assert "hunter2" not in resp.text
     assert resp.json()["detail"] == "Failed to analyze product compatibility."
+
+
+# ============================================================ Dupe detection
+# GET /shelf/analyze/{product_id} — find_shelf_duplicates(), wired in
+# alongside the existing conflict analysis above.
+#
+# compute_ingredient_similarity() and the conflict-detection algorithm are
+# each already covered elsewhere (test_baumann_scoring.py, the
+# products-compare tests, the conflict tests above). These prove only what is
+# new: the active-ingredient filter, the same-category constraint, self-
+# exclusion, the no-actives edge case, ordering, and that duplicates never
+# touches is_safe/warnings.
+
+VITC_TARGET_ID = "prod-vitc"
+VITC_ID, TOCOPHEROL_ID, HYALURONATE_ID = "ing-vitc", "ing-tocopherol", "ing-hyaluronate"
+
+
+def active_ing(ing_id, name, group="Antioxidant"):
+    return {"id": ing_id, "name": name, "functional_group": group}
+
+
+def filler_ing(ing_id, name, group="Solvent"):
+    return {"id": ing_id, "name": name, "functional_group": group}
+
+
+def target_product(ingredients, product_id=VITC_TARGET_ID, category="Treatments"):
+    return {"id": product_id, "category": category,
+            "product_ingredients": [{"ingredients": i} for i in ingredients]}
+
+
+def shelf_dupe_candidate(item_id, user_id, prod_id, name, category, ingredients,
+                         usage_state="active"):
+    return shelf_row(item_id, user_id, usage_state, product={
+        "id": prod_id, "brand": "Brand", "name": name, "category": category,
+        "product_ingredients": [{"ingredients": i} for i in ingredients],
+    })
+
+
+VITC_ACTIVES = [
+    active_ing(VITC_ID, "Ascorbic Acid"),
+    active_ing(TOCOPHEROL_ID, "Tocopherol"),
+    active_ing(HYALURONATE_ID, "Sodium Hyaluronate", group="Humectant"),
+]
+
+
+def dupe_store(target, shelf_items):
+    return {
+        "shelf_items": shelf_items,
+        "products": [target],
+        "users": [],
+        "conflict_rules": [],
+        "category_conflict_rules": [],
+    }
+
+
+def duplicates(resp):
+    return resp.json()["duplicates"]
+
+
+def test_analyze_flags_a_shelf_product_sharing_most_actives(client, patch_supabase, as_user):
+    """Returns a duplicates entry naming the shelf product, its 100.0 similarity
+    score and its three shared active ingredient names, when a shelf product's
+    actives are identical to the target's."""
+    as_user("user-1")
+    twin = shelf_dupe_candidate("item-1", "user-1", "prod-twin", "Twin Serum",
+                                "Treatments", VITC_ACTIVES)
+    patch_supabase(dupe_store(target_product(VITC_ACTIVES), [twin]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+
+    dupes = duplicates(resp)
+    assert len(dupes) == 1
+    assert dupes[0]["product_id"] == "prod-twin"
+    assert dupes[0]["similarity"] == 100.0
+    assert dupes[0]["shared_actives"] == ["Ascorbic Acid", "Sodium Hyaluronate", "Tocopherol"]
+
+
+def test_analyze_does_not_flag_a_shelf_product_sharing_only_fillers(client, patch_supabase, as_user):
+    """Returns no duplicates for a shelf product whose only overlap with the
+    target is filler ingredients, even though the raw, unfiltered overlap
+    (66.7%) would clear the threshold — this is the case the active-ingredient
+    filter exists for. Regression guard: without filter_active_ingredients(),
+    or without discarding a candidate whose actives filter down to nothing,
+    this shelf product would be wrongly reported as a dupe."""
+    as_user("user-1")
+    target = target_product([
+        filler_ing("ing-water", "Water"),
+        filler_ing("ing-glycerin", "Glycerin", group="Vehicle"),
+        active_ing(VITC_ID, "Ascorbic Acid"),
+    ])
+    filler_only = shelf_dupe_candidate("item-1", "user-1", "prod-filler", "Basic Toner",
+                                       "Treatments", [
+                                           filler_ing("ing-water", "Water"),
+                                           filler_ing("ing-glycerin", "Glycerin", group="Vehicle"),
+                                       ])
+    patch_supabase(dupe_store(target, [filler_only]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+    assert duplicates(resp) == []
+
+
+def test_analyze_excludes_a_different_category_even_with_identical_actives(client, patch_supabase, as_user):
+    """Returns no duplicates for a shelf product whose actives are identical to
+    the target's when it belongs to a different category, so a cleanser is
+    never reported as a redundant purchase against a serum however closely its
+    formula matches."""
+    as_user("user-1")
+    twin_wrong_category = shelf_dupe_candidate("item-1", "user-1", "prod-twin", "Twin Cleanser",
+                                               "Cleansers", VITC_ACTIVES)
+    patch_supabase(dupe_store(target_product(VITC_ACTIVES), [twin_wrong_category]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+    assert duplicates(resp) == []
+
+
+def test_analyze_never_lists_the_target_as_its_own_duplicate(client, patch_supabase, as_user):
+    """Returns no duplicates entry for the target product itself, when the
+    product being viewed is also already on the caller's own shelf."""
+    as_user("user-1")
+    target = target_product(VITC_ACTIVES)
+    same_product_on_shelf = shelf_dupe_candidate(
+        "item-1", "user-1", VITC_TARGET_ID, "Vitamin C Serum", "Treatments", VITC_ACTIVES
+    )
+    patch_supabase(dupe_store(target, [same_product_on_shelf]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+    assert duplicates(resp) == []
+
+
+def test_analyze_returns_no_duplicates_for_a_target_with_no_active_ingredients(client, patch_supabase, as_user):
+    """Returns an empty duplicates list, not an error, when the target product's
+    ingredients are entirely filler and it therefore has no actives to compare
+    the shelf against."""
+    as_user("user-1")
+    target = target_product([
+        filler_ing("ing-water", "Water"),
+        filler_ing("ing-glycerin", "Glycerin", group="Vehicle"),
+    ])
+    # Would score 100% on a raw comparison; must never be reached, since the
+    # target has no actives to compare against in the first place.
+    twin = shelf_dupe_candidate("item-1", "user-1", "prod-twin", "Twin Toner", "Treatments", [
+        filler_ing("ing-water", "Water"),
+        filler_ing("ing-glycerin", "Glycerin", group="Vehicle"),
+    ])
+    patch_supabase(dupe_store(target, [twin]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+    assert duplicates(resp) == []
+
+
+def test_analyze_duplicates_do_not_affect_is_safe_or_warnings(client, patch_supabase, as_user):
+    """Returns is_safe=False and a Chemical Interaction Warning exactly as the
+    conflict analysis alone would produce, alongside a populated duplicates
+    list from an unrelated shelf product — proving the two mechanisms run
+    independently and a dupe never flips is_safe."""
+    as_user("user-1")
+    conflict_rule = {
+        "ingredient_a_id": VITC_ID, "ingredient_b_id": "ing-conflicting",
+        "severity": "high", "warning_message": "Layering these raises irritation risk.",
+    }
+    target = target_product(VITC_ACTIVES)
+    twin = shelf_dupe_candidate("item-1", "user-1", "prod-twin", "Twin Serum",
+                                "Treatments", VITC_ACTIVES)
+    conflicting = shelf_dupe_candidate("item-2", "user-1", "prod-conflict", "Conflicting Product",
+                                       "Other", [active_ing("ing-conflicting", "Conflicting Active")])
+    store = dupe_store(target, [twin, conflicting])
+    store["conflict_rules"] = [conflict_rule]
+    patch_supabase(store, "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["is_safe"] is False
+    assert any(w["alert_type"] == "Chemical Interaction Warning" for w in body["warnings"])
+    assert len(body["duplicates"]) == 1
+    assert body["duplicates"][0]["product_id"] == "prod-twin"
+
+
+def test_analyze_orders_duplicates_by_descending_similarity(client, patch_supabase, as_user):
+    """Returns duplicates ordered highest-similarity-first: the shelf product
+    matching all three actives ahead of the one matching only two.
+
+    Seeded with the lower-scoring product FIRST on the shelf, so a passing
+    result can only come from an explicit sort - iteration order alone would
+    produce the wrong sequence."""
+    as_user("user-1")
+    partial_twin = shelf_dupe_candidate("item-1", "user-1", "prod-partial", "Partial Twin",
+                                        "Treatments", VITC_ACTIVES[:2])
+    full_twin = shelf_dupe_candidate("item-2", "user-1", "prod-full", "Full Twin",
+                                     "Treatments", VITC_ACTIVES)
+    patch_supabase(dupe_store(target_product(VITC_ACTIVES), [partial_twin, full_twin]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+
+    dupes = duplicates(resp)
+    assert [d["product_id"] for d in dupes] == ["prod-full", "prod-partial"]
+    assert dupes[0]["similarity"] > dupes[1]["similarity"]
+
+
+def test_analyze_does_not_flag_a_shelf_product_below_the_similarity_threshold(client, patch_supabase, as_user):
+    """Returns no duplicates for a shelf product whose actives overlap the
+    target's at 25% — a real, nonzero overlap, but below the 60.0 threshold —
+    so a moderate coincidental match is not reported as owning a duplicate."""
+    as_user("user-1")
+    moderate_overlap = shelf_dupe_candidate("item-1", "user-1", "prod-moderate", "Different Serum",
+                                            "Treatments", [
+                                                VITC_ACTIVES[0],  # the one shared active
+                                                active_ing("ing-niacinamide", "Niacinamide"),
+                                            ])
+    patch_supabase(dupe_store(target_product(VITC_ACTIVES), [moderate_overlap]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+    assert duplicates(resp) == []
+
+
+def test_analyze_flags_a_dupe_even_with_extra_filler_on_the_shelf_side(client, patch_supabase, as_user):
+    """Returns the shelf product as a duplicate at 100.0 similarity even though
+    its raw ingredient list also carries three filler ingredients absent from
+    the target — those fillers must be stripped from the shelf side too, not
+    only the target side, or their presence would inflate the comparison's
+    union and dilute a real match below the threshold (an unfiltered
+    comparison here scores 50.0, which would wrongly miss this dupe)."""
+    as_user("user-1")
+    twin_with_noise = shelf_dupe_candidate("item-1", "user-1", "prod-twin", "Twin Serum",
+                                           "Treatments", VITC_ACTIVES + [
+                                               filler_ing("ing-water", "Water"),
+                                               filler_ing("ing-glycerin", "Glycerin", group="Vehicle"),
+                                               filler_ing("ing-xanthan", "Xanthan Gum"),
+                                           ])
+    patch_supabase(dupe_store(target_product(VITC_ACTIVES), [twin_with_noise]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get(f"/shelf/analyze/{VITC_TARGET_ID}")
+    assert resp.status_code == 200
+
+    dupes = duplicates(resp)
+    assert len(dupes) == 1
+    assert dupes[0]["similarity"] == 100.0
 
 
 # ============================================================ Task 4
