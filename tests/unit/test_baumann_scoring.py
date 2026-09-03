@@ -18,13 +18,28 @@ def ing(name, group=None):
 
 # --- Guard clause ------------------------------------------------------------
 
-@pytest.mark.parametrize("bad_code", ["", None, "DS", "X"])
-def test_missing_or_short_code_returns_neutral_default(bad_code):
-    """Returns the neutral default score of 85 with no caution reasons when the
-    skin-type code is absent or shorter than four characters."""
-    result = compute_baumann_compatibility(bad_code, [])
-    assert result["score"] == 85
+# "dspt", "XXXX" and "DSPTX" are the cases a length-based guard lets through:
+# they are four or more characters, so they reach the case-sensitive axis checks,
+# match none of them, and score a bare 75 that reads as a real evaluation. The
+# shorter codes take the other limb. Both must reach the same answer.
+@pytest.mark.parametrize(
+    "invalid_code", ["", None, "DS", "X", "dspt", "XXXX", "DSPTX", "1234"]
+)
+def test_invalid_skin_type_code_returns_no_score(invalid_code):
+    """Returns no score, and neither match nor caution reasons, when the
+    skin-type code is not one of the sixteen valid Baumann codes."""
+    result = compute_baumann_compatibility(invalid_code, [])
+    assert result["score"] is None
+    assert result["match_reasons"] == []
     assert result["caution_reasons"] == []
+
+
+def test_valid_skin_type_code_is_still_scored():
+    """Returns a numeric score for a valid Baumann code, so that rejecting
+    invalid codes cannot be satisfied by refusing to score anything."""
+    result = compute_baumann_compatibility("DSPT", [])
+    assert isinstance(result["score"], int)
+    assert 15 <= result["score"] <= 99
 
 
 # --- Axis 1: Oily (O) vs Dry (D) ---------------------------------------------

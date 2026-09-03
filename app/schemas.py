@@ -3,11 +3,13 @@ from pydantic import BaseModel, field_validator
 from typing import Optional, Dict, List, Any
 
 # Baumann 16-Type code: one letter from each axis pair (O/D, S/R, P/N, W/T).
-_BAUMANN_PATTERN = re.compile(r"^[OD][SR][PN][WT]$")
+# Public rather than underscore-prefixed: app/api/products.py imports it so the
+# scoring function rejects exactly the codes the write paths refuse to store.
+BAUMANN_PATTERN = re.compile(r"^[OD][SR][PN][WT]$")
 
 
 def validate_baumann_skin_type(v: str) -> str:
-    if not _BAUMANN_PATTERN.match(v):
+    if not BAUMANN_PATTERN.match(v):
         raise ValueError("skin_type must be a 4-letter Baumann code, e.g. 'DSPT'")
     return v
 

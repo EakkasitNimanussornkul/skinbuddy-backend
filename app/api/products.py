@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id, get_optional_user_id
-from app.schemas import ProductDetail, CompareResponse, SharedIngredient
+from app.schemas import ProductDetail, CompareResponse, SharedIngredient, BAUMANN_PATTERN
 from app.core.services.ingredientcheck_service import calculate_safety_flags  # 🌟 ADDED IMPORT
 from app.core.services import compatibility_service
 # compute_ingredient_similarity now lives in compatibility_service.py, not
@@ -40,8 +40,23 @@ def ingredients_of(prod: dict) -> List[Dict[str, Any]]:
 
 def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Evaluates product ingredients against Baumann 16-Type combinations."""
-    if not user_skin_type or len(user_skin_type) < 4:
-        return {"score": 85, "match_reasons": ["Formulated for general barrier maintenance."], "caution_reasons": []}
+    # Validate the code rather than measure it. A length test passed anything
+    # with four characters through to the axis checks below, which are
+    # case-sensitive substring matches - so "dspt" matched no axis, adjusted
+    # nothing, and returned a bare 75 that is indistinguishable from a valid
+    # code scored against a product with no ingredient data. A short or absent
+    # code took the other limb and returned 85, which is not a neutral default
+    # but the top of the green band, above the 75 every real evaluation starts
+    # from. Reusing the pattern POST /quiz/save and PATCH /auth/me validate
+    # against makes the scorer agree with the writer about what a valid skin
+    # type is. (FE-DEF-10)
+    if not user_skin_type or not BAUMANN_PATTERN.match(user_skin_type):
+        # No score rather than a default, and no reason either: the generic
+        # reason asserted something about the product without reading its
+        # ingredients, and an explanation for a verdict the UI is not showing
+        # is worse than none. Every consumer already handles None - it is the
+        # anonymous-caller shape this endpoint serves today.
+        return {"score": None, "match_reasons": [], "caution_reasons": []}
 
     score = 75
     match_reasons = []
