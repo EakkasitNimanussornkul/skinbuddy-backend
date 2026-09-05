@@ -93,3 +93,22 @@ def test_matching_is_case_insensitive():
     """Returns silicone_free=False for an uppercase ingredient name, confirming
     matching does not depend on the casing used in the catalogue."""
     assert calculate_safety_flags(ings("DIMETHICONE"))["silicone_free"] is False
+
+
+# --- Word-boundary terms (BE-DEF-09) -----------------------------------------
+
+def test_honeysuckle_extract_is_not_treated_as_honey():
+    """Returns vegan=True for Lonicera Japonica (Honeysuckle) Flower Extract,
+    which is plant-derived.
+
+    Regression guard for BE-DEF-09: "honey" was matched as a bare substring and
+    so matched inside "honeysuckle", marking a plant extract non-vegan."""
+    flags = calculate_safety_flags(ings("Lonicera Japonica (Honeysuckle) Flower Extract"))
+    assert flags["vegan"] is True
+
+
+@pytest.mark.parametrize("name", ["Honey", "Honey Extract", "Manuka Honey"])
+def test_actual_honey_is_still_flagged_non_vegan(name):
+    """Returns vegan=False for honey itself, so excluding "honeysuckle" does not
+    also excuse the ingredient the rule exists for."""
+    assert calculate_safety_flags(ings(name))["vegan"] is False

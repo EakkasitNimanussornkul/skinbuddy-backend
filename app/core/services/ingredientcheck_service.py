@@ -15,7 +15,12 @@ FUNGAL_ACNE_TRIGGERS = [
 # Single-word terms matched as bare substrings, e.g. "ethanol", would also match
 # inside unrelated compound words like "phenoxyethanol". Match these on word
 # boundaries instead so only the standalone ingredient name triggers the flag.
-_WORD_BOUNDARY_TERMS = {"ethanol"}
+#
+# "honey" is here for the same reason: it matched inside "Lonicera Japonica
+# (Honeysuckle) Flower Extract", marking a plant extract non-vegan. \bhoney\b
+# does not match "honeysuckle", while still matching "Honey" and "Honey Extract".
+# BE-DEF-09.
+_WORD_BOUNDARY_TERMS = {"ethanol", "honey"}
 
 
 def _matches(term: str, name: str) -> bool:

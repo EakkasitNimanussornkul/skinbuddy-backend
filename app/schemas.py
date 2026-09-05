@@ -1,6 +1,6 @@
 import re
 from pydantic import BaseModel, field_validator
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Literal
 
 # Baumann 16-Type code: one letter from each axis pair (O/D, S/R, P/N, W/T).
 # Public rather than underscore-prefixed: app/api/products.py imports it so the
@@ -116,9 +116,18 @@ class ProductDetail(ProductResponse):
 
 
 # 6. DIGITAL SHELF / INVENTORY SCHEMAS
+
+# Mirrors the shelf_item_state database enum, whose members are confirmed by the
+# verification step of 0001_security_and_fk_cleanup.sql. Declared once and shared
+# so the two request models cannot drift apart from each other or from the
+# column. Without it any string was accepted, and Postgres rejected the write as
+# a 500 for what was really a malformed request. BE-DEF-08.
+UsageState = Literal["unopened", "active", "archived"]
+
+
 class ShelfItemCreate(BaseModel):
-    product_id: str  
-    usage_state: str  
+    product_id: str
+    usage_state: UsageState
     opened_date: Optional[str] = None
     expiration_date: Optional[str] = None
     pao: Optional[int] = None

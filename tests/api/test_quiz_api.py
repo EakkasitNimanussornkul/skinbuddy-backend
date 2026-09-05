@@ -120,3 +120,39 @@ def test_quiz_save_reports_failure_when_the_profile_row_is_missing(client, patch
 
     resp = client.post("/quiz/save", json=PAYLOAD)
     assert resp.status_code == 404
+
+
+def test_quiz_save_stores_no_result_when_the_profile_update_is_refused(
+    client, patch_supabase, as_user
+):
+    """Leaves the quiz_results table empty when the profile update matches no
+    row, so a refused save does not leave a stored result behind whose skin type
+    never reached any profile.
+
+    Regression guard for BE-DEF-10: the two writes are not transactional, so the
+    order decides what a failure leaves behind. The result was previously
+    inserted first and survived the 404."""
+    as_user("ghost-user")
+    store = {"quiz_results": [], "users": []}
+    patch_supabase(store, "app.api.quiz")
+
+    resp = client.post("/quiz/save", json=PAYLOAD)
+    assert resp.status_code == 404
+    assert store["quiz_results"] == []
+
+
+def test_quiz_save_records_the_result_when_the_profile_exists(
+    client, patch_supabase, as_user
+):
+    """Writes both the profile skin type and the quiz_results row on a
+    successful save, so ordering the writes defensively did not stop the result
+    being recorded at all."""
+    as_user("user-1")
+    store = {"quiz_results": [], "users": [{"id": "user-1", "skin_type": None}]}
+    patch_supabase(store, "app.api.quiz")
+
+    resp = client.post("/quiz/save", json=PAYLOAD)
+    assert resp.status_code == 200
+    assert store["users"][0]["skin_type"] == PAYLOAD["skinType"]
+    assert len(store["quiz_results"]) == 1
+    assert store["quiz_results"][0]["skin_type"] == PAYLOAD["skinType"]

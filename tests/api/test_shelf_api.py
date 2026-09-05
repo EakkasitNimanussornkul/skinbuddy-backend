@@ -203,6 +203,23 @@ def test_analyze_reports_safe_when_the_shelf_is_empty(client, patch_supabase, as
     assert resp.json() == {"is_safe": True, "warnings": [], "duplicates": []}
 
 
+def test_analyze_404s_for_an_unknown_product(client, patch_supabase, as_user):
+    """Returns HTTP 404 when the product being analysed matches no catalogue
+    row, rather than a 500 or a confident "safe" verdict for a product the
+    system never found.
+
+    Regression guard for BE-DEF-07: the handler used .single(), which the real
+    client raises PGRST116 on for zero rows, and the generic clause reported
+    that as a 500."""
+    as_user("user-1")
+    patch_supabase({"shelf_items": [], "products": [], "users": [{"id": "user-1", "skin_type": "DSPT"}]},
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/no-such-product")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Product not found."
+
+
 def test_analyze_does_not_leak_internal_errors(client, patch_supabase, as_user, monkeypatch):
     """Returns HTTP 500 with the generic body "Failed to analyze product
     compatibility." and no trace of the internal exception text, when the
@@ -562,6 +579,51 @@ def test_add_rejects_a_request_missing_a_required_field(client, patch_supabase, 
 
     assert resp.status_code == 422
     assert fake.store["shelf_items"] == []
+
+
+@pytest.mark.parametrize("bad_state", ["banana", "ACTIVE", "opened", ""])
+def test_add_rejects_a_usage_state_outside_the_enum(client, patch_supabase, as_user, bad_state):
+    """Returns HTTP 422 and writes nothing for a usage_state that is not one of
+    unopened, active or archived.
+
+    Regression guard for BE-DEF-08: the field was a bare str, so any value was
+    accepted by the API and rejected by the database enum, surfacing a malformed
+    request as a 500."""
+    as_user("user-1")
+    fake = patch_supabase({"shelf_items": []}, "app.api.shelf")
+
+    resp = client.post("/shelf/add", json={"product_id": "p1", "usage_state": bad_state})
+
+    assert resp.status_code == 422
+    assert fake.store["shelf_items"] == []
+
+
+@pytest.mark.parametrize("good_state", ["unopened", "active", "archived"])
+def test_add_accepts_every_state_the_enum_defines(client, patch_supabase, as_user, good_state):
+    """Returns HTTP 200 for each of the three valid usage_state values, so
+    rejecting invalid ones did not narrow the field to a subset of the enum."""
+    as_user("user-1")
+    patch_supabase({"shelf_items": []}, "app.api.shelf")
+
+    resp = client.post("/shelf/add", json={"product_id": "p1", "usage_state": good_state})
+    assert resp.status_code == 200
+    assert resp.json()["usage_state"] == good_state
+
+
+@pytest.mark.parametrize("bad_state", ["banana", "ACTIVE", ""])
+def test_status_rejects_a_usage_state_outside_the_enum(client, patch_supabase, as_user, bad_state):
+    """Returns HTTP 422 and leaves the stored usage_state unchanged for a value
+    outside the enum, so the update path is guarded like the insert path."""
+    as_user("user-1")
+    fake = patch_supabase(
+        {"shelf_items": [{"id": "i1", "user_id": "user-1", "usage_state": "active"}]},
+        "app.api.shelf",
+    )
+
+    resp = client.patch("/shelf/i1/status", json={"usage_state": bad_state})
+
+    assert resp.status_code == 422
+    assert fake.store["shelf_items"][0]["usage_state"] == "active"
 
 
 def test_add_does_not_leak_internal_errors(client, patch_supabase, as_user, monkeypatch):

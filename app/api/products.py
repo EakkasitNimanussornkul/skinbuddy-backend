@@ -375,18 +375,29 @@ async def compare_two_products(
 @router.get("/{product_id}")
 async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(get_optional_user_id)):
     try:
+        # .limit(1) rather than .single(): the real client's .single() RAISES on
+        # zero rows (PGRST116), which the generic handler below turned into a 500
+        # for a product that simply does not exist. The sibling resolvers
+        # (get_product_by_slug, compare_two_products) already read a list for the
+        # same reason. BE-DEF-07.
         user_skin_type = ""
         if user_id:
-            user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-            user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
+            if user_res.data:
+                user_skin_type = user_res.data[0].get("skin_type") or ""
 
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).single().execute()
-        data = res.data
+        res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).limit(1).execute()
 
-        if data:
-            data.update(compute_product_display_fields(data, user_skin_type))
+        if not res.data:
+            raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
 
+        data = res.data[0]
+        data.update(compute_product_display_fields(data, user_skin_type))
         return data
+    except HTTPException:
+        # Ahead of the generic clause below, which catches HTTPException too and
+        # would re-raise the 404 above as a 500 - the trap BE-DEF-02 describes.
+        raise
     except Exception as e:
         print("GET /products/{id} error:", e)
         raise HTTPException(status_code=500, detail="Failed to fetch product.")

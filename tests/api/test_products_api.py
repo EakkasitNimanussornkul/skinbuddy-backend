@@ -323,6 +323,58 @@ def test_slug_similar_products_carry_the_fields_the_widget_renders(client, patch
 
 # --- Error-message hygiene ---------------------------------------------------
 
+# --- GET /products/{product_id} (BE-DEF-07) ----------------------------------
+
+def test_product_detail_404s_for_an_unknown_id(client, patch_supabase):
+    """Returns HTTP 404 for a product id that matches no row, rather than a 500
+    or a 200 carrying a null body.
+
+    Regression guard for BE-DEF-07: the handler used .single(), which the real
+    client raises PGRST116 on for zero rows, and the generic handler reported
+    that as "Failed to fetch product." with status 500."""
+    patch_supabase({"products": [], "users": []}, "app.api.products")
+
+    resp = client.get("/products/00000000-0000-0000-0000-000000000000")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Product '00000000-0000-0000-0000-000000000000' not found."
+
+
+def test_product_detail_returns_the_product_when_it_exists(client, patch_supabase):
+    """Returns HTTP 200 and the product enriched with display fields, so the 404
+    above is a genuine not-found rather than the endpoint refusing everything."""
+    patch_supabase(
+        {"products": [product("p1", "CeraVe", "Cleanser", "Cleanser", [])], "users": []},
+        "app.api.products",
+    )
+
+    resp = client.get("/products/p1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "p1"
+    assert "safety_flags" in body
+
+
+def test_product_detail_survives_an_authenticated_user_with_no_profile_row(
+    client, patch_supabase, as_user
+):
+    """Returns HTTP 200 with no skin match score when the caller's token is valid
+    but no users row exists, rather than failing the whole request."""
+    from app.core.services.token import get_optional_user_id
+    from app.main import app
+
+    app.dependency_overrides[get_optional_user_id] = lambda: "ghost-user"
+    try:
+        patch_supabase(
+            {"products": [product("p1", "CeraVe", "Cleanser", "Cleanser", [])], "users": []},
+            "app.api.products",
+        )
+        resp = client.get("/products/p1")
+        assert resp.status_code == 200
+        assert resp.json()["skin_match_score"] is None
+    finally:
+        app.dependency_overrides.pop(get_optional_user_id, None)
+
+
 def test_internal_errors_are_not_leaked_to_clients(client, monkeypatch):
     """Returns HTTP 500 with the generic body "Failed to search products." and no
     trace of the internal exception text, when a database call raises."""

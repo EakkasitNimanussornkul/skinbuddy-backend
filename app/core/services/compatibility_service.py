@@ -253,26 +253,32 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
     warnings: List[WarningAlert] = []
 
     # 1. User Baumann skin type (anonymous callers skip this check)
+    #
+    # .limit(1) rather than .single() throughout: the real client's .single()
+    # RAISES on zero rows (PGRST116), so an unknown user or product turned into
+    # a 500 at whichever handler called this. Reading a list lets a missing row
+    # be the empty, meaningful answer it already is below. BE-DEF-07.
     user_skin_type = None
     if user_id:
-        user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-        user_skin_type = user_res.data.get("skin_type") if user_res.data else None
+        user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
+        user_skin_type = user_res.data[0].get("skin_type") if user_res.data else None
 
     # 2. Target product metadata
     target_res = (
         supabase.table("products")
         .select("*, product_ingredients(ingredients(*))")
         .eq("id", product_id)
-        .single()
+        .limit(1)
         .execute()
     )
+    target_data = target_res.data[0] if target_res.data else None
 
     target_ingredient_ids = []
     target_groups: Dict[str, list] = {}
     target_ing_id_to_name: Dict[str, str] = {}
 
-    if target_res.data and target_res.data.get("product_ingredients"):
-        for item in target_res.data["product_ingredients"]:
+    if target_data and target_data.get("product_ingredients"):
+        for item in target_data["product_ingredients"]:
             ing = item.get("ingredients")
             if ing:
                 target_ingredient_ids.append(ing["id"])
@@ -282,8 +288,8 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                     target_groups.setdefault(normalize_text_accents(fg), []).append(ing["name"])
 
     # --- Skin type direct conflicts ---
-    if user_skin_type and target_res.data:
-        for item in target_res.data["product_ingredients"]:
+    if user_skin_type and target_data:
+        for item in target_data["product_ingredients"]:
             ing = item.get("ingredients")
             if ing:
                 bad_for_str = ing.get("bad_for")
