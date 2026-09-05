@@ -96,6 +96,66 @@ def test_search_with_no_matching_products_returns_an_empty_list(client, patch_su
     assert resp.json() == []
 
 
+@pytest.fixture
+def capture_or(monkeypatch):
+    """Record the expression handed to PostgREST's or_().
+
+    The fake does not implement or_ — it answers through the no-op chain — so a
+    status-code assertion cannot tell a safe filter from an injected one. The
+    expression itself is the only observable that can, which is why BE-DEF-06's
+    guard asserts on it rather than on the response.
+
+    The class is taken off a live fake rather than imported: pytest loads
+    conftest under its own module name, so `import tests.conftest` yields a
+    second, unused copy of FakeQuery and patching it records nothing.
+    """
+    def _capture(fake):
+        seen = []
+        cls = type(fake.table("products"))
+        original = getattr(cls, "or_", None)
+
+        def spy(self, expr):
+            seen.append(expr)
+            return original(self, expr) if original else self
+
+        monkeypatch.setattr(cls, "or_", spy, raising=False)
+        return seen
+
+    return _capture
+
+
+@pytest.mark.parametrize("query", ["Vitamin C, 10%", "serum, cleanser", "a,b"])
+def test_search_keeps_a_comma_inside_the_quoted_filter_value(
+    client, patch_supabase, capture_or, query
+):
+    """Returns HTTP 200 for a query containing a comma, and sends exactly three
+    filter conditions, so the comma cannot terminate one condition and start
+    another (BE-DEF-06)."""
+    fake = patch_supabase({"products": []}, "app.api.products")
+    seen = capture_or(fake)
+
+    resp = client.get("/products/search", params={"q": query})
+    assert resp.status_code == 200
+
+    expr = seen[0]
+    assert expr.count("ilike") == 3
+    for column in ("name", "brand", "category"):
+        assert f'{column}.ilike."%{query}%"' in expr
+
+
+def test_search_escapes_a_quote_that_would_break_out_of_the_filter(
+    client, patch_supabase, capture_or
+):
+    """Returns the double quote backslash-escaped inside the filter expression,
+    so a query containing one cannot close the value and inject a condition."""
+    fake = patch_supabase({"products": []}, "app.api.products")
+    seen = capture_or(fake)
+
+    resp = client.get("/products/search", params={"q": 'x"y'})
+    assert resp.status_code == 200
+    assert 'name.ilike."%x\\"y%"' in seen[0]
+
+
 # --- GET /products/compare ---------------------------------------------------
 
 @pytest.fixture

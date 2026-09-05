@@ -7,6 +7,7 @@ Docstrings state the expected output, and are lifted verbatim into the
 import pytest
 
 from app.core.utils import create_slug
+from app.api.products import postgrest_quote
 from app.core.services.compatibility_service import (
     _build_comparison_maps,
     normalize_product,
@@ -124,3 +125,34 @@ def test_build_comparison_maps_skips_ingredients_without_a_group():
     groups, ingredient_ids = _build_comparison_maps(products)
     assert groups == {}
     assert ingredient_ids == {"i1": "P"}
+
+
+# --- postgrest_quote (BE-DEF-06) ---------------------------------------------
+
+def test_postgrest_quote_escapes_the_double_quote_that_would_end_the_value():
+    """Returns the double quote backslash-escaped, so a value containing one
+    cannot terminate the quoted PostgREST filter it is embedded in."""
+    assert postgrest_quote('say "hi"') == 'say \\"hi\\"'
+
+
+def test_postgrest_quote_escapes_backslashes_before_quotes():
+    """Returns a doubled backslash, so a trailing backslash cannot escape the
+    closing quote of the filter value."""
+    assert postgrest_quote("back\\slash") == "back\\\\slash"
+    assert postgrest_quote('a\\"b') == 'a\\\\\\"b'
+
+
+@pytest.mark.parametrize("value", ["Vitamin C, 10%", "serum, cleanser", "a,b"])
+def test_postgrest_quote_leaves_commas_intact_for_the_quotes_to_contain(value):
+    """Returns the comma unchanged. It is neutralised by the surrounding quotes
+    rather than by stripping it, so the user still searches for what they
+    typed."""
+    assert postgrest_quote(value) == value
+
+
+@pytest.mark.parametrize("value", ["niacinamide 10%", "2% BHA", "under_score"])
+def test_postgrest_quote_preserves_like_wildcards(value):
+    """Returns % and _ unchanged. They have always behaved as SQL LIKE
+    wildcards in catalogue search, and this escaping deliberately does not
+    change that."""
+    assert postgrest_quote(value) == value

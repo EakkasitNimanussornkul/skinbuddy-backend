@@ -38,6 +38,27 @@ def ingredients_of(prod: dict) -> List[Dict[str, Any]]:
     return [item["ingredients"] for item in prod.get("product_ingredients", []) or [] if item.get("ingredients")]
 
 
+def postgrest_quote(value: str) -> str:
+    """Quote a user-supplied value for use inside a PostgREST filter.
+
+    `or_()` takes a COMMA-SEPARATED list of conditions, so an unescaped comma in
+    the value ends one condition and begins another. That is not hypothetical:
+    searching "Vitamin C, 10%" produced a malformed logic tree and a 500 from an
+    entirely ordinary query (BE-DEF-06).
+
+    PostgREST treats a double-quoted value as a single literal, with `"` and a
+    backslash escaped by a backslash inside it. Quoting therefore neutralises
+    `,` `.` `(` `)` and `:` in one step rather than stripping them, so the user
+    keeps searching for what they typed.
+
+    Deliberately does NOT escape the SQL LIKE wildcards `%` and `_`. They have
+    always behaved as wildcards here, "niacinamide 10%" relies on it, and
+    changing that is a search-semantics decision rather than part of fixing the
+    crash.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Evaluates product ingredients against Baumann 16-Type combinations."""
     # Validate the code rather than measure it. A length test passed anything
@@ -237,8 +258,10 @@ async def search_products(
 
         query = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
         if q:
-            clean_q = q.strip()
-            query = query.or_(f"name.ilike.%{clean_q}%,brand.ilike.%{clean_q}%,category.ilike.%{clean_q}%")
+            clean_q = postgrest_quote(q.strip())
+            query = query.or_(
+                f'name.ilike."%{clean_q}%",brand.ilike."%{clean_q}%",category.ilike."%{clean_q}%"'
+            )
         
         if min_price is not None:
             query = query.gte("price_thb", min_price)
