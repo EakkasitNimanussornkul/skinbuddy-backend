@@ -226,8 +226,27 @@ def get_routine_products(user_id: str, exclude_product_id: Optional[str] = None)
 
 
 def _build_comparison_maps(products: List[dict]):
-    """Return (functional_group -> [(product, ingredient)], ingredient_id -> product)."""
+    """Return (functional_group -> [(product, ingredient)], ingredient_id -> product).
+
+    The comparison set is the user's shelf rows, and a shelf holds rows, not
+    distinct products: nothing stops the same product being added twice, and
+    people do it (a backup bottle, a re-purchase logged before the old one was
+    archived). Each row carries the same ingredients, so an unguarded list here
+    held one (product, ingredient) pair per row, and PASS 2 below appends one
+    warning per pair - three bottles of the same serum produced the same
+    warning three times, and inflated the "N Warnings" count on the card by the
+    same factor.
+
+    A conflict is a fact about a product, not about how many of it someone
+    owns. Pairs are de-duplicated so it is stated once.
+
+    De-duplicated on the pair, not on the product: two *different* products that
+    each clash still produce a warning each, naming themselves, which is
+    correct - the user needs to know about both. Insertion order is preserved
+    so warning order stays stable between runs.
+    """
     groups: Dict[str, list] = {}
+    seen_pairs: Dict[str, set] = {}
     ingredient_ids: Dict[str, str] = {}
     for prod in products:
         prod_name = prod.get("name")
@@ -236,8 +255,37 @@ def _build_comparison_maps(products: List[dict]):
             fg = ing.get("functional_group")
             if fg:
                 norm_fg = normalize_text_accents(fg)
-                groups.setdefault(norm_fg, []).append((prod_name, ing["name"]))
+                pair = (prod_name, ing["name"])
+                if pair in seen_pairs.setdefault(norm_fg, set()):
+                    continue
+                seen_pairs[norm_fg].add(pair)
+                groups.setdefault(norm_fg, []).append(pair)
     return groups, ingredient_ids
+
+
+def _dedupe_warnings(warnings: List[WarningAlert]) -> List[WarningAlert]:
+    """Collapse warnings that say exactly the same thing, keeping the first.
+
+    The pair de-duplication above stops the shelf multiplying PASS 2 warnings at
+    the source. This is the guarantee at the boundary: whatever the passes
+    produce, the caller never receives the same sentence twice. It also covers
+    the skin-type pass, which walks the target product's own ingredient rows and
+    would repeat itself if a product were ever joined to the same ingredient
+    more than once.
+
+    Identity is the whole alert - type, severity and message. Two warnings that
+    differ only by which product they name are different warnings and both
+    survive.
+    """
+    seen = set()
+    unique: List[WarningAlert] = []
+    for warning in warnings:
+        key = (warning.alert_type, warning.severity, warning.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(warning)
+    return unique
 
 
 # --- Core analysis -----------------------------------------------------------
@@ -304,6 +352,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
 
     # Nothing to compare against -> only skin-type warnings (if any) apply.
     if not comparison_ingredient_ids and not comparison_groups:
+        warnings = _dedupe_warnings(warnings)
         return AnalysisResponse(is_safe=len(warnings) == 0, warnings=warnings)
 
     # --- PASS 1: ingredient-to-ingredient (conflict_rules) ---
@@ -351,4 +400,5 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                         message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}",
                     ))
 
+    warnings = _dedupe_warnings(warnings)
     return AnalysisResponse(is_safe=len(warnings) == 0, warnings=warnings)
