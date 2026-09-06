@@ -14,14 +14,14 @@ Endpoints
   DELETE /routine/steps/{id}/complete  -> undo completion                  (UC-22 A1)
   GET    /routine/adherence            -> completion history by day        (UC-28)
 """
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
-from app.core.services import compatibility_service, routine_service
+from app.core.services import compatibility_service, routine_service, schedule_service
 from app.schemas import (
     AnalysisResponse,
     RoutineGenerateRequest,
@@ -247,15 +247,23 @@ async def remove_step(step_id: str, user_id: str = Depends(get_current_user_id))
 # --- UC-19: edit frequency --------------------------------------------------
 
 VALID_FREQUENCIES = {"daily", "3x_week", "2x_week", "weekly"}
+VALID_TIMES_OF_DAY = {"AM", "PM", "both"}
 
 
 @router.patch("/steps/{step_id}/frequency")
 async def update_frequency(step_id: str, req: FrequencyUpdateRequest, user_id: str = Depends(get_current_user_id)):
     if req.frequency not in VALID_FREQUENCIES:  # [E1] invalid
         raise HTTPException(status_code=400, detail="Invalid frequency option.")
+    if req.time_of_day is not None and req.time_of_day not in VALID_TIMES_OF_DAY:  # [E1]
+        raise HTTPException(status_code=400, detail="Invalid time of day option.")
     if not _owns_step(step_id, user_id):
         raise HTTPException(status_code=404, detail="Step not found.")
-    res = supabase.table("routine_steps").update({"frequency": req.frequency}).eq("id", step_id).execute()
+
+    payload = {"frequency": req.frequency}
+    if req.time_of_day is not None:
+        payload["time_of_day"] = req.time_of_day
+
+    res = supabase.table("routine_steps").update(payload).eq("id", step_id).execute()
     return res.data[0] if res.data else {}
 
 
@@ -309,24 +317,129 @@ async def uncomplete_step(step_id: str, period_key: Optional[str] = None, user_i
     return {"message": "Completion removed", "period_key": pk}
 
 
-# --- UC-28: adherence history by day ----------------------------------------
+# --- UC-27: routine completion history --------------------------------------
 
 @router.get("/adherence")
-async def get_adherence(user_id: str = Depends(get_current_user_id)):
+async def get_adherence(weeks: int = 8, user_id: str = Depends(get_current_user_id)):
+    """Completion history grouped by day (UC-27, SRS-103..SRS-108).
+
+    Completions are read by user_id rather than by the active routine's step ids,
+    so replacing a routine does not wipe the visible history or reset the streak.
+
+    What was "due" on a given day is derived from the CURRENT routine and each
+    step's CURRENT frequency. Editing a frequency therefore changes past due
+    counts retroactively — a documented limitation. `routine_step_completions`
+    records the frequency in force at completion time so this can be tightened
+    later without another migration.
+    """
+    today = date.today()
+    start = today - timedelta(weeks=max(1, min(weeks, 52)))
+
+    # 1. What counts as "due": the steps of the active routine.
     routine = _get_active_routine(user_id)
-    if not routine:
-        return {"total_steps": 0, "days": {}}
-    steps = supabase.table("routine_steps").select("id").eq("routine_id", routine["id"]).execute()
-    step_ids = [s["id"] for s in (steps.data or [])]
-    if not step_ids:
-        return {"total_steps": 0, "days": {}}
+    steps = []
+    if routine:
+        res = (
+            supabase.table("routine_steps")
+            .select("id, frequency, time_of_day, step_order, products(name)")
+            .eq("routine_id", routine["id"])
+            .order("step_order")
+            .execute()
+        )
+        steps = res.data or []
+    step_names = {st["id"]: (st.get("products") or {}).get("name") or "Product" for st in steps}
+
+    # 2. Everything the user has actually ticked in the window.
     comps = (
         supabase.table("routine_step_completions")
-        .select("step_id, period_key, completed_at")
-        .in_("step_id", step_ids)
+        .select("step_id, product_id, period_key")
+        .eq("user_id", user_id)
+        .gte("period_key", start.isoformat())
+        .lte("period_key", today.isoformat())
         .execute()
     )
+    completions = comps.data or []
+
+    # Names for completions whose step has since been deleted (step_id is null).
+    orphan_product_ids = {
+        c["product_id"] for c in completions
+        if c.get("product_id") and c.get("step_id") not in step_names
+    }
+    orphan_names: dict = {}
+    if orphan_product_ids:
+        prods = (
+            supabase.table("products")
+            .select("id, name")
+            .in_("id", list(orphan_product_ids))
+            .execute()
+        )
+        orphan_names = {p["id"]: p.get("name") or "Product" for p in (prods.data or [])}
+
+    by_day: dict = {}
+    for c in completions:
+        by_day.setdefault(c["period_key"], []).append(c)
+
+    # 3. Classify every day in the window.
     days: dict = {}
-    for c in (comps.data or []):
-        days.setdefault(c["period_key"], []).append(c["step_id"])
-    return {"total_steps": len(step_ids), "days": days}
+    cursor = start
+    while cursor <= today:
+        key = cursor.isoformat()
+        due = [st for st in steps if schedule_service.is_due(st.get("frequency"), cursor)]
+        done_ids = {c["step_id"] for c in by_day.get(key, []) if c.get("step_id")}
+
+        completed = [{"step_id": st["id"], "product_name": step_names[st["id"]]}
+                     for st in due if st["id"] in done_ids]
+        missed = [{"step_id": st["id"], "product_name": step_names[st["id"]]}
+                  for st in due if st["id"] not in done_ids]
+
+        # Ticked that day but no longer part of the routine — still real history.
+        also = [
+            {"step_id": None, "product_name": orphan_names.get(c.get("product_id"), "Removed product")}
+            for c in by_day.get(key, [])
+            if c.get("step_id") not in step_names
+        ]
+
+        if not due:  # [SRS-104] a rest day is not a miss
+            status = "none"
+        elif not completed:
+            status = "missed"
+        elif len(completed) == len(due):
+            status = "complete"
+        else:
+            status = "partial"
+
+        days[key] = {
+            "status": status,
+            "due": len(due),
+            "done": len(completed),
+            "completed": completed,
+            "missed": missed,
+            "also_completed": also,
+        }
+        cursor += timedelta(days=1)
+
+    # 4. Streak (SRS-107): consecutive complete days back from today. Rest days
+    #    carry the streak; today is skipped while it is still in progress.
+    streak = 0
+    cursor = today
+    if days.get(today.isoformat(), {}).get("status") != "complete":
+        cursor = today - timedelta(days=1)
+    while cursor >= start:
+        status = days.get(cursor.isoformat(), {}).get("status")
+        if status == "complete":
+            streak += 1
+        elif status != "none":
+            break
+        cursor -= timedelta(days=1)
+
+    scheduled = [d for d in days.values() if d["status"] != "none"]
+    completed_days = [d for d in scheduled if d["status"] == "complete"]
+
+    return {
+        "range": {"from": start.isoformat(), "to": today.isoformat()},
+        "total_steps": len(steps),
+        "streak": streak,
+        "adherence_pct": round(100 * len(completed_days) / len(scheduled)) if scheduled else 0,
+        "has_history": bool(completions),  # [SRS-108] empty state
+        "days": days,
+    }
