@@ -32,6 +32,10 @@ def product(name, *ingredients):
 
 RETINOL = ("ing-retinol", "Retinol", "Retinoid")
 
+# _build_comparison_maps keys the group map on normalize_text_accents(group),
+# so the key is lower-case however the catalogue capitalised the group name.
+RETINOID_KEY = "retinoid"
+
 
 # --- _build_comparison_maps --------------------------------------------------
 
@@ -43,7 +47,7 @@ def test_the_same_product_held_twice_contributes_one_comparison_pair():
 
     groups, _ = _build_comparison_maps(shelf)
 
-    assert groups["Retinoid"] == [("Night Serum", "Retinol")]
+    assert groups[RETINOID_KEY] == [("Night Serum", "Retinol")]
 
 
 def test_the_same_product_held_five_times_still_contributes_one_pair():
@@ -53,7 +57,7 @@ def test_the_same_product_held_five_times_still_contributes_one_pair():
 
     groups, _ = _build_comparison_maps(shelf)
 
-    assert len(groups["Retinoid"]) == 1
+    assert len(groups[RETINOID_KEY]) == 1
 
 
 def test_two_different_products_that_clash_each_contribute_a_pair():
@@ -63,7 +67,7 @@ def test_two_different_products_that_clash_each_contribute_a_pair():
 
     groups, _ = _build_comparison_maps(shelf)
 
-    assert groups["Retinoid"] == [("Night Serum", "Retinol"), ("Retinal Cream", "Retinal")]
+    assert groups[RETINOID_KEY] == [("Night Serum", "Retinol"), ("Retinal Cream", "Retinal")]
 
 
 def test_one_product_with_two_ingredients_in_a_group_contributes_both():
@@ -74,7 +78,7 @@ def test_one_product_with_two_ingredients_in_a_group_contributes_both():
 
     groups, _ = _build_comparison_maps(shelf)
 
-    assert len(groups["Retinoid"]) == 2
+    assert len(groups[RETINOID_KEY]) == 2
 
 
 def test_comparison_pairs_keep_the_order_the_shelf_supplied():
@@ -84,7 +88,7 @@ def test_comparison_pairs_keep_the_order_the_shelf_supplied():
 
     groups, _ = _build_comparison_maps(shelf)
 
-    assert [name for name, _ in groups["Retinoid"]] == ["B Serum", "A Serum"]
+    assert [name for name, _ in groups[RETINOID_KEY]] == ["B Serum", "A Serum"]
 
 
 def test_an_ingredient_with_no_functional_group_contributes_no_pair():
@@ -95,7 +99,7 @@ def test_an_ingredient_with_no_functional_group_contributes_no_pair():
     groups, ingredient_ids = _build_comparison_maps(shelf)
 
     assert groups == {}
-    assert ingredient_ids == {"ing-water": "Plain Lotion"}
+    assert ingredient_ids == {"ing-water": ["Plain Lotion"]}
 
 
 # --- _dedupe_warnings --------------------------------------------------------

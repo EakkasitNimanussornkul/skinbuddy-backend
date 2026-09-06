@@ -226,7 +226,7 @@ def get_routine_products(user_id: str, exclude_product_id: Optional[str] = None)
 
 
 def _build_comparison_maps(products: List[dict]):
-    """Return (functional_group -> [(product, ingredient)], ingredient_id -> product).
+    """Return (functional_group -> [(product, ingredient)], ingredient_id -> [products]).
 
     The comparison set is the user's shelf rows, and a shelf holds rows, not
     distinct products: nothing stops the same product being added twice, and
@@ -244,14 +244,28 @@ def _build_comparison_maps(products: List[dict]):
     each clash still produce a warning each, naming themselves, which is
     correct - the user needs to know about both. Insertion order is preserved
     so warning order stays stable between runs.
+
+    The second map holds a *list* of product names per ingredient, for the same
+    reason the first holds a list of pairs. It was a plain dict of one name, so
+    when two different shelf products both contained the clashing ingredient -
+    a vitamin C serum and a vitamin C moisturiser - the second assignment
+    overwrote the first and PASS 1 reported only whichever row Postgres happened
+    to return last. get_active_shelf_products has no ORDER BY, so which one
+    survived was not even stable between calls. The other conflict was never
+    reported and nothing marked it as omitted. BE-DEF-12.
+
+    Duplicate rows of the *same* product are collapsed here too, so widening
+    this to a list cannot undo BE-DEF-11 by another route.
     """
     groups: Dict[str, list] = {}
     seen_pairs: Dict[str, set] = {}
-    ingredient_ids: Dict[str, str] = {}
+    ingredient_ids: Dict[str, List[str]] = {}
     for prod in products:
         prod_name = prod.get("name")
         for ing in prod.get("ingredients", []):
-            ingredient_ids[ing["id"]] = prod_name
+            owners = ingredient_ids.setdefault(ing["id"], [])
+            if prod_name not in owners:
+                owners.append(prod_name)
             fg = ing.get("functional_group")
             if fg:
                 norm_fg = normalize_text_accents(fg)
@@ -286,6 +300,62 @@ def _dedupe_warnings(warnings: List[WarningAlert]) -> List[WarningAlert]:
         seen.add(key)
         unique.append(warning)
     return unique
+
+
+_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def _severity_rank(severity: Optional[str]) -> int:
+    """Order the three severities the rule tables use, for comparing two rules.
+
+    An unrecognised or missing severity ranks 0, which suppresses nothing - a
+    rule the system cannot grade must not be allowed to silence another one.
+    """
+    return _SEVERITY_RANK.get((severity or "").strip().lower(), 0)
+
+
+def _is_shadowed_by_specific_rule(
+    target_ing_names: List[str],
+    prod_name: str,
+    comp_ing_name: str,
+    category_severity: str,
+    covered: Dict[tuple, int],
+) -> bool:
+    """True when PASS 1 has already reported every ingredient pair this category
+    warning would restate, at least as seriously.
+
+    The two rule tables describe the same clash at two levels of detail.
+    conflict_rules names an ingredient pair that has been curated by hand;
+    category_conflict_rules generalises over functional groups so a newly
+    catalogued acid still raises a warning before anyone writes a rule for it.
+    Where a curated rule exists the general one adds no fact - it restates the
+    same clash between the same two products in different words, and the user
+    reads two warnings for one problem. Retinol + Salicylic Acid is exactly
+    this: conflict_rules and category_conflict_rules (Retinoid + BHA) both
+    carry it, both at high, so a retinol serum checked against a BHA exfoliant
+    produced two warnings naming the same product. BE-DEF-13.
+
+    The specific rule wins because it names the actual ingredients and carries
+    the message written for them. The general rule is the fallback, and stays
+    in the table - deleting the row would leave a newly added AHA unwarned.
+
+    Suppressed only when the specific rule is at least as severe, so a general
+    rule graded higher than the curated one still reaches the user rather than
+    being quietly downgraded.
+
+    Suppressed only when *every* target ingredient in the group is covered. A
+    product carrying two retinoids where only one has a curated rule still
+    needs the category warning, because it is the only thing that mentions the
+    other one.
+    """
+    if not target_ing_names:
+        return False
+    category_rank = _severity_rank(category_severity)
+    for target_ing_name in target_ing_names:
+        specific_rank = covered.get((target_ing_name, prod_name, comp_ing_name), 0)
+        if specific_rank == 0 or specific_rank < category_rank:
+            return False
+    return True
 
 
 # --- Core analysis -----------------------------------------------------------
@@ -348,12 +418,36 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                         message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for Baumann Type {user_skin_type}.",
                     ))
 
+    # Whether the target could be assessed at all, which is not the same thing
+    # as whether anything was found wrong with it. A product with no ingredient
+    # rows, and a product_id that resolves to no row at all, both reach every
+    # return below having been compared against nothing - and used to be handed
+    # back as is_safe=true, presenting an unassessed product to the user as
+    # checked and clear. FE-DEF-28.
+    #
+    # Deliberately not tied to the comparison set: a target with ingredients and
+    # an empty shelf HAS been assessed (the skin-type pass ran against it) and
+    # may correctly come back clear. GET /products/compare depends on that - it
+    # calls analyze(prod_b, user_id, []) with an empty comparison on purpose.
+    target_assessed = bool(target_ingredient_ids)
+
     comparison_groups, comparison_ingredient_ids = _build_comparison_maps(comparison_products)
 
     # Nothing to compare against -> only skin-type warnings (if any) apply.
     if not comparison_ingredient_ids and not comparison_groups:
         warnings = _dedupe_warnings(warnings)
-        return AnalysisResponse(is_safe=len(warnings) == 0, warnings=warnings)
+        return AnalysisResponse(is_safe=target_assessed and len(warnings) == 0, warnings=warnings)
+
+    comparison_ing_names = {
+        ing["id"]: ing["name"]
+        for prod in comparison_products
+        for ing in prod.get("ingredients", [])
+        if ing.get("id") and ing.get("name")
+    }
+
+    # What PASS 1 has already said, so PASS 2 does not restate it:
+    # (target ingredient, comparison product, comparison ingredient) -> severity rank.
+    covered_by_specific_rule: Dict[tuple, int] = {}
 
     # --- PASS 1: ingredient-to-ingredient (conflict_rules) ---
     if target_ingredient_ids and comparison_ingredient_ids:
@@ -361,20 +455,34 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
         for rule in (specific_rules.data or []):
             id_a = rule.get("ingredient_a_id")
             id_b = rule.get("ingredient_b_id")
+
+            # A rule states an unordered pair, so either column may be the one
+            # the target carries. Resolved once here rather than in two mirrored
+            # branches, which have to stay in step with each other.
             if id_a in target_ingredient_ids and id_b in comparison_ingredient_ids:
-                clashing_product = comparison_ingredient_ids[id_b]
-                warnings.append(WarningAlert(
-                    alert_type="Chemical Interaction Warning",
-                    severity=rule["severity"].title(),
-                    message=f"Conflict with {clashing_product}: Layering {target_ing_id_to_name[id_a]} directly alongside it triggers a structural clash. {rule['warning_message']}",
-                ))
+                target_id, comparison_id = id_a, id_b
             elif id_b in target_ingredient_ids and id_a in comparison_ingredient_ids:
-                clashing_product = comparison_ingredient_ids[id_a]
+                target_id, comparison_id = id_b, id_a
+            else:
+                continue
+
+            target_ing_name = target_ing_id_to_name[target_id]
+            comp_ing_name = comparison_ing_names.get(comparison_id)
+            severity = rule["severity"].title()
+
+            # Every product carrying the clashing ingredient, not just one of
+            # them. BE-DEF-12.
+            for clashing_product in comparison_ingredient_ids[comparison_id]:
                 warnings.append(WarningAlert(
                     alert_type="Chemical Interaction Warning",
-                    severity=rule["severity"].title(),
-                    message=f"Conflict with {clashing_product}: Layering {target_ing_id_to_name[id_b]} directly alongside it triggers a structural clash. {rule['warning_message']}",
+                    severity=severity,
+                    message=f"Conflict with {clashing_product}: Layering {target_ing_name} directly alongside it triggers a structural clash. {rule['warning_message']}",
                 ))
+                if comp_ing_name:
+                    key = (target_ing_name, clashing_product, comp_ing_name)
+                    covered_by_specific_rule[key] = max(
+                        covered_by_specific_rule.get(key, 0), _severity_rank(rule["severity"])
+                    )
 
     # --- PASS 2: functional-group / category (category_conflict_rules) ---
     if target_groups and comparison_groups:
@@ -384,21 +492,24 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
             rule_b = normalize_text_accents(rule.get("group_b"))
 
             if rule_a in target_groups and rule_b in comparison_groups:
-                target_ing_names = ", ".join(target_groups[rule_a])
-                for prod_name, comp_ing_name in comparison_groups[rule_b]:
-                    warnings.append(WarningAlert(
-                        alert_type="Active Routine Clash",
-                        severity=rule["severity"].title(),
-                        message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}",
-                    ))
+                target_group, comparison_group = rule_a, rule_b
             elif rule_b in target_groups and rule_a in comparison_groups:
-                target_ing_names = ", ".join(target_groups[rule_b])
-                for prod_name, comp_ing_name in comparison_groups[rule_a]:
-                    warnings.append(WarningAlert(
-                        alert_type="Active Routine Clash",
-                        severity=rule["severity"].title(),
-                        message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}",
-                    ))
+                target_group, comparison_group = rule_b, rule_a
+            else:
+                continue
+
+            target_ing_names = ", ".join(target_groups[target_group])
+            for prod_name, comp_ing_name in comparison_groups[comparison_group]:
+                if _is_shadowed_by_specific_rule(
+                    target_groups[target_group], prod_name, comp_ing_name,
+                    rule["severity"], covered_by_specific_rule,
+                ):
+                    continue
+                warnings.append(WarningAlert(
+                    alert_type="Active Routine Clash",
+                    severity=rule["severity"].title(),
+                    message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}",
+                ))
 
     warnings = _dedupe_warnings(warnings)
-    return AnalysisResponse(is_safe=len(warnings) == 0, warnings=warnings)
+    return AnalysisResponse(is_safe=target_assessed and len(warnings) == 0, warnings=warnings)
