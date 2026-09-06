@@ -1,10 +1,11 @@
 from datetime import date, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.db.connection import supabase
 from app.config.setting import settings
-from app.core.services import line_service
+from app.core.services import line_service, schedule_service
 
 router = APIRouter()
 
@@ -27,9 +28,27 @@ def _checkin_url() -> str:
 # --- UC-21: routine step reminders ------------------------------------------
 
 @router.post("/routine-reminders")
-async def run_routine_reminders(x_cron_secret: str | None = Header(default=None)):
+async def run_routine_reminders(
+    session: Optional[str] = Query(
+        default=None,
+        description='Which routine session to remind about: "am" or "pm". '
+                    'Omit to include every step due today.',
+    ),
+    x_cron_secret: str | None = Header(default=None),
+):
+    """Push a reminder listing the steps due right now (UC-21).
+
+    Scheduled twice a day: `?session=am` at 06:00 and `?session=pm` at 22:00.
+    Only steps whose cadence falls on today are included, so a 2x/week step is not
+    pushed seven days a week (SRS-81), and editing a step's frequency changes what
+    gets sent from the next run onward (SRS-78).
+    """
     _check_secret(x_cron_secret)
-    today = date.today().isoformat()
+    if session is not None and session.strip().lower() not in schedule_service.VALID_SESSIONS:
+        raise HTTPException(status_code=400, detail='session must be "am" or "pm".')
+
+    today_date = date.today()
+    today = today_date.isoformat()
 
     users = (
         supabase.table("users")
@@ -59,12 +78,20 @@ async def run_routine_reminders(x_cron_secret: str | None = Header(default=None)
 
         steps = (
             supabase.table("routine_steps")
-            .select("id, products(name)")
+            .select("id, frequency, time_of_day, products(name)")
             .eq("routine_id", routine.data[0]["id"])
             .order("step_order")
             .execute()
         )
-        step_ids = [s["id"] for s in (steps.data or [])]
+
+        # [SRS-81] Only steps actually scheduled for today, in this session.
+        due_steps = [
+            st for st in (steps.data or [])
+            if schedule_service.is_due_now(
+                st.get("frequency"), st.get("time_of_day"), session, today_date
+            )
+        ]
+        step_ids = [st["id"] for st in due_steps]
         if not step_ids:
             skipped += 1
             continue
@@ -79,8 +106,8 @@ async def run_routine_reminders(x_cron_secret: str | None = Header(default=None)
         )
         done = {c["step_id"] for c in (comp.data or [])}
         pending = [
-            (s.get("products") or {}).get("name", "Product")
-            for s in (steps.data or []) if s["id"] not in done
+            (st.get("products") or {}).get("name", "Product")
+            for st in due_steps if st["id"] not in done
         ]
         if not pending:
             skipped += 1
@@ -94,10 +121,17 @@ async def run_routine_reminders(x_cron_secret: str | None = Header(default=None)
     return {"sent": sent, "skipped": skipped}
 
 
-# --- UC-27: weekly check-in reminders ---------------------------------------
+# --- UC-26: weekly check-in reminders ---------------------------------------
 
 @router.post("/weekly-checkin-reminders")
 async def run_weekly_checkin_reminders(x_cron_secret: str | None = Header(default=None)):
+    """Push a reminder to submit this week's skin log (UC-26).
+
+    Scheduled once a week (e.g. Sunday 18:00). Mirrors the routine reminder
+    (UC-21): only notification-enabled, friended users are pushed, and a user
+    who already submitted this week's log is skipped so no duplicate nag is sent
+    (SRS-83-style de-dup; UC-23 [A1]).
+    """
     _check_secret(x_cron_secret)
     d = date.today()
     week_start = (d - timedelta(days=d.weekday())).isoformat()
@@ -111,12 +145,13 @@ async def run_weekly_checkin_reminders(x_cron_secret: str | None = Header(defaul
 
     sent, skipped = 0, 0
     for user in (users.data or []):
+        # No LINE friendship / id -> cannot push.
         line_id = user.get("line_id")
         if not line_id:
             skipped += 1
             continue
 
-        # [A2] Already submitted this week -> no reminder.
+        # [UC-23 A1] Already submitted this week -> no reminder.
         existing = (
             supabase.table("skin_logs")
             .select("id")
