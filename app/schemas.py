@@ -215,6 +215,9 @@ class RoutineStepCreate(BaseModel):
 
 class FrequencyUpdateRequest(BaseModel):
     frequency: str
+    # UC-19: the session a step belongs to is edited alongside its cadence.
+    # Optional so existing callers that only send a frequency keep working.
+    time_of_day: Optional[str] = None
 
 class ReorderRequest(BaseModel):
     step_ids: List[str]
