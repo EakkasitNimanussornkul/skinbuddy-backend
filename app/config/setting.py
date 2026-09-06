@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     LINE_CHANNEL_SECRET: str
     LINE_REDIRECT_URI: str
 
-    # --- LINE Messaging API (push notifications: UC-21, UC-27) ---
+    # --- LINE Messaging API (push notifications: UC-21, UC-26) ---
     # Optional so the app still boots without messaging configured.
     LINE_CHANNEL_ACCESS_TOKEN: Optional[str] = None
     # URL the reminder buttons open (your routine / check-in page or LIFF URL).

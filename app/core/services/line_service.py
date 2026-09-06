@@ -59,7 +59,7 @@ def build_routine_reminder(step_names: List[str], liff_url: str) -> List[dict]:
 
 
 def build_weekly_checkin_reminder(liff_url: str) -> List[dict]:
-    """Weekly check-in reminder (UC-27)."""
+    """Weekly check-in reminder (UC-26)."""
     return [{
         "type": "template",
         "altText": "Time for your weekly skin check-in",
