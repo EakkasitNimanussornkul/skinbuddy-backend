@@ -158,31 +158,51 @@ def test_search_escapes_a_quote_that_would_break_out_of_the_filter(
 
 # --- GET /products/compare ---------------------------------------------------
 
-@pytest.fixture
-def conflicting_catalog(patch_supabase):
-    """Retinol vs BHA — clashing on both an explicit ingredient pair rule and a
-    functional-group rule."""
-    store = {
+RETINOL_VS_SA_RULE = {
+    "ingredient_a_id": "ing-retinol", "ingredient_b_id": "ing-sa",
+    "severity": "high", "warning_message": "Use on alternate evenings.",
+}
+RETINOID_VS_BHA_CATEGORY_RULE = {
+    "group_a": "Retinoid", "group_b": "Beta Hydroxy Acid (BHA)",
+    "severity": "high", "warning_message": "Layering these raises irritation risk.",
+}
+
+
+def _compare_store(conflict_rules, category_conflict_rules):
+    return {
         "products": [
             product(PROD_A_ID, "The Ordinary", "Retinol 0.2% in Squalane", "Serum", [RETINOL]),
             product(PROD_B_ID, "Paula's Choice", "2% BHA Liquid Exfoliant", "Exfoliant", [SALICYLIC]),
         ],
-        "conflict_rules": [{
-            "ingredient_a_id": "ing-retinol", "ingredient_b_id": "ing-sa",
-            "severity": "high", "warning_message": "Use on alternate evenings.",
-        }],
-        "category_conflict_rules": [{
-            "group_a": "Retinoid", "group_b": "Beta Hydroxy Acid (BHA)",
-            "severity": "high", "warning_message": "Layering these raises irritation risk.",
-        }],
+        "conflict_rules": conflict_rules,
+        "category_conflict_rules": category_conflict_rules,
         "users": [],
     }
-    return patch_supabase(store, "app.api.products",
-                          "app.core.services.compatibility_service")
 
 
-def test_compare_runs_the_full_three_pass_conflict_analysis(client, conflicting_catalog):
-    """REGRESSION: compare only ran the category pass, so it silently
+@pytest.fixture
+def conflicting_catalog(patch_supabase):
+    """Retinol vs BHA — the real catalogue's overlap, where the same clash is
+    described twice: once as a curated ingredient pair and once as a functional
+    group pair."""
+    return patch_supabase(
+        _compare_store([RETINOL_VS_SA_RULE], [RETINOID_VS_BHA_CATEGORY_RULE]),
+        "app.api.products", "app.core.services.compatibility_service")
+
+
+@pytest.fixture
+def category_only_catalog(patch_supabase):
+    """The same two products with no curated rule for the pair, so only the
+    functional-group rule can report the clash."""
+    return patch_supabase(
+        _compare_store([], [RETINOID_VS_BHA_CATEGORY_RULE]),
+        "app.api.products", "app.core.services.compatibility_service")
+
+
+def test_compare_runs_the_ingredient_pair_pass(client, conflicting_catalog):
+    """Returns a Chemical Interaction Warning for a curated ingredient pair.
+
+    REGRESSION: compare only ran the category pass, so it silently
     under-reported conflicts that Shelf and Routine both surfaced."""
     resp = client.get("/products/compare",
                       params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID})
@@ -190,7 +210,38 @@ def test_compare_runs_the_full_three_pass_conflict_analysis(client, conflicting_
 
     alert_types = {c["alert_type"] for c in resp.json()["conflicts"]}
     assert "Chemical Interaction Warning" in alert_types
+
+
+def test_compare_runs_the_category_pass_when_no_curated_rule_covers_the_pair(
+        client, category_only_catalog):
+    """Returns an Active Routine Clash from the functional-group rule when no
+    ingredient-pair rule exists, so the general rule still reaches the user.
+
+    The other half of the three-pass guarantee: the pass is exercised on its own
+    here because, where both rules describe the same clash, the general one is
+    deliberately suppressed."""
+    resp = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID})
+    assert resp.status_code == 200
+
+    alert_types = {c["alert_type"] for c in resp.json()["conflicts"]}
     assert "Active Routine Clash" in alert_types
+
+
+def test_compare_states_one_clash_once_when_both_rule_tables_describe_it(
+        client, conflicting_catalog):
+    """Returns a single conflict for Retinol against a BHA exfoliant, the curated
+    one, rather than restating the same clash as a category conflict.
+
+    Regression guard for BE-DEF-13: conflict_rules and category_conflict_rules
+    both carry Retinol + Salicylic Acid at high severity, so the user was shown
+    two warnings naming the same product for one problem."""
+    conflicts = client.get("/products/compare",
+                           params={"product_a_id": PROD_A_ID,
+                                   "product_b_id": PROD_B_ID}).json()["conflicts"]
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["alert_type"] == "Chemical Interaction Warning"
 
 
 def test_compare_works_without_authentication(client, conflicting_catalog):

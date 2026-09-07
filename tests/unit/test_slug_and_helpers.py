@@ -98,14 +98,14 @@ def test_normalize_product_tolerates_missing_joins(payload):
 
 def test_build_comparison_maps_indexes_groups_and_ids():
     """Returns a functional-group map of {group: [(product, ingredient)]} and an
-    ingredient-id map of {ingredient_id: product name}."""
+    ingredient-id map of {ingredient_id: [product names]}."""
     products = [{
         "name": "Retinol Serum",
         "ingredients": [{"id": "i1", "name": "Retinol", "functional_group": "Retinoid"}],
     }]
     groups, ingredient_ids = _build_comparison_maps(products)
     assert groups == {"retinoid": [("Retinol Serum", "Retinol")]}
-    assert ingredient_ids == {"i1": "Retinol Serum"}
+    assert ingredient_ids == {"i1": ["Retinol Serum"]}
 
 
 def test_build_comparison_maps_normalises_group_case_and_accents():
@@ -124,7 +124,7 @@ def test_build_comparison_maps_skips_ingredients_without_a_group():
     products = [{"name": "P", "ingredients": [{"id": "i1", "name": "Water"}]}]
     groups, ingredient_ids = _build_comparison_maps(products)
     assert groups == {}
-    assert ingredient_ids == {"i1": "P"}
+    assert ingredient_ids == {"i1": ["P"]}
 
 
 # --- postgrest_quote (BE-DEF-06) ---------------------------------------------

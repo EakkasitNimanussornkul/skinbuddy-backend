@@ -203,6 +203,166 @@ def test_analyze_reports_safe_when_the_shelf_is_empty(client, patch_supabase, as
     assert resp.json() == {"is_safe": True, "warnings": [], "duplicates": []}
 
 
+# --- Each real conflict, stated exactly once (BE-DEF-12, BE-DEF-13) ----------
+
+SECOND_BHA_PRODUCT = joined_product("Exfoliating Toner", "ing-sa", "Salicylic Acid",
+                                    "Beta Hydroxy Acid (BHA)")
+
+RETINOL_VS_SA_RULE = {
+    "ingredient_a_id": "ing-retinol",
+    "ingredient_b_id": "ing-sa",
+    "severity": "high",
+    "warning_message": "Use on alternate evenings.",
+}
+
+
+def rule_store(shelf_items, conflict_rules, category_conflict_rules):
+    return {
+        "shelf_items": shelf_items,
+        "products": [RETINOL_TARGET],
+        "users": [{"id": "user-1", "skin_type": "ORNT"}],
+        "conflict_rules": conflict_rules,
+        "category_conflict_rules": category_conflict_rules,
+    }
+
+
+def messages(response):
+    return [w["message"] for w in response.json()["warnings"]]
+
+
+def test_analyze_names_every_shelf_product_carrying_the_clashing_ingredient(
+        client, patch_supabase, as_user):
+    """Returns a warning naming each active shelf product that contains the
+    clashing ingredient, rather than only one of them.
+
+    Regression guard for BE-DEF-12: the ingredient-to-product index was a dict
+    keyed by ingredient id, so the second product overwrote the first and its
+    conflict was never reported. get_active_shelf_products has no ORDER BY, so
+    which one survived was not stable between calls either."""
+    as_user("user-1")
+    patch_supabase(
+        rule_store(
+            [shelf_row("item-1", "user-1", "active", BHA_PRODUCT),
+             shelf_row("item-2", "user-1", "active", SECOND_BHA_PRODUCT)],
+            [RETINOL_VS_SA_RULE], [],
+        ),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-retinol")
+    assert resp.status_code == 200
+
+    named = messages(resp)
+    assert len(named) == 2
+    assert any("2% BHA Liquid" in m for m in named)
+    assert any("Exfoliating Toner" in m for m in named)
+
+
+def test_analyze_states_one_clash_once_when_both_rule_tables_describe_it(
+        client, patch_supabase, as_user):
+    """Returns a single warning, the curated ingredient-pair one, when a clash is
+    described by both conflict_rules and category_conflict_rules.
+
+    Regression guard for BE-DEF-13: the live catalogue carries Retinol +
+    Salicylic Acid in both tables at high severity, so a retinol serum checked
+    against a BHA exfoliant produced a Chemical Interaction Warning and an
+    Active Routine Clash naming the same product for the same problem."""
+    as_user("user-1")
+    patch_supabase(
+        rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)],
+                   [RETINOL_VS_SA_RULE], [RETINOID_VS_BHA_RULE]),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-retinol")
+    assert resp.status_code == 200
+    assert resp.json()["is_safe"] is False
+    assert alert_types(resp) == {"Chemical Interaction Warning"}
+
+
+def test_analyze_keeps_a_category_rule_graded_above_the_curated_one(
+        client, patch_supabase, as_user):
+    """Returns both warnings when the category rule is more severe than the
+    ingredient-pair rule covering the same clash, so suppressing the general
+    rule can never quietly downgrade the verdict the user is shown."""
+    as_user("user-1")
+    patch_supabase(
+        rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)],
+                   [{**RETINOL_VS_SA_RULE, "severity": "low"}], [RETINOID_VS_BHA_RULE]),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-retinol")
+    assert resp.status_code == 200
+    assert alert_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+
+
+def test_analyze_keeps_a_category_rule_covering_an_ingredient_no_curated_rule_reaches(
+        client, patch_supabase, as_user):
+    """Returns both warnings when the target carries two ingredients in the
+    conflicting group and only one of them has a curated rule, because the
+    category warning is the only thing that mentions the other.
+
+    Suppression is per ingredient pair, not per group: a group is only silenced
+    when every ingredient in it has already been reported."""
+    as_user("user-1")
+    two_retinoids = {
+        "id": "prod-retinol",
+        "name": "Double Retinoid Serum",
+        "product_ingredients": [
+            {"ingredients": {"id": "ing-retinol", "name": "Retinol",
+                             "functional_group": "Retinoid"}},
+            {"ingredients": {"id": "ing-retinal", "name": "Retinal",
+                             "functional_group": "Retinoid"}},
+        ],
+    }
+    store = rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)],
+                       [RETINOL_VS_SA_RULE], [RETINOID_VS_BHA_RULE])
+    store["products"] = [two_retinoids]
+    patch_supabase(store, "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/prod-retinol")
+    assert resp.status_code == 200
+    assert alert_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+
+
+def test_analyze_keeps_a_category_rule_no_curated_rule_covers(
+        client, patch_supabase, as_user):
+    """Returns the Active Routine Clash when no ingredient-pair rule describes
+    the clash, so the general rule still reaches the user - it is the fallback
+    that covers a newly catalogued acid nobody has written a rule for yet."""
+    as_user("user-1")
+    patch_supabase(
+        rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)],
+                   [], [RETINOID_VS_BHA_RULE]),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-retinol")
+    assert resp.status_code == 200
+    assert "Active Routine Clash" in alert_types(resp)
+
+
+def test_analyze_does_not_report_a_product_that_could_not_be_assessed_as_safe(
+        client, patch_supabase, as_user):
+    """Returns is_safe=False with no warnings for a catalogue product that has no
+    ingredient rows, so the frontend treats the scan as unavailable and fails
+    closed rather than showing a clear result.
+
+    Regression guard for FE-DEF-28. The catalogue holds no such product today
+    (7 of 7 have ingredients), but nothing prevents one being added."""
+    as_user("user-1")
+    store = rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)], [], [])
+    store["products"] = [{"id": "prod-empty", "name": "Mystery Cream",
+                          "category": "Moisturizer", "product_ingredients": []}]
+    patch_supabase(store, "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/prod-empty")
+    assert resp.status_code == 200
+    assert resp.json()["warnings"] == []
+    assert resp.json()["is_safe"] is False
+
+
 def test_analyze_404s_for_an_unknown_product(client, patch_supabase, as_user):
     """Returns HTTP 404 when the product being analysed matches no catalogue
     row, rather than a 500 or a confident "safe" verdict for a product the
