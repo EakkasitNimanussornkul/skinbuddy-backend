@@ -77,6 +77,51 @@ def _owns_step(step_id: str, user_id: str) -> bool:
     return bool(routine.data)
 
 
+def _owned_step(step_id: str, user_id: str):
+    """Like _owns_step but returns the step row (id, product_id, frequency,
+    time_of_day) so a completion can denormalise those fields — or None if the
+    step does not belong to the user."""
+    step = (
+        supabase.table("routine_steps")
+        .select("id, routine_id, product_id, frequency, time_of_day")
+        .eq("id", step_id).limit(1).execute()
+    )
+    if not step.data:
+        return None
+    s = step.data[0]
+    routine = (
+        supabase.table("routines").select("id")
+        .eq("id", s["routine_id"]).eq("user_id", user_id).limit(1).execute()
+    )
+    return s if routine.data else None
+
+
+# --- AM/PM sessions ---------------------------------------------------------
+# A step's time_of_day says which session(s) it runs in. A completion's
+# time_of_day says which session was actually ticked ("AM"/"PM", or the legacy
+# "both" marker meaning the whole day). UC-22 / UC-27.
+
+VALID_SESSIONS = {"AM", "PM"}
+
+
+def _sessions_for(time_of_day) -> list:
+    """The concrete sessions a step (or a completion) covers. "both"/unknown ->
+    both AM and PM; "AM"/"PM" -> just that one."""
+    t = (time_of_day or "both").strip().lower()
+    if t == "am":
+        return ["AM"]
+    if t == "pm":
+        return ["PM"]
+    return ["AM", "PM"]
+
+
+def _session_label(time_of_day):
+    """"AM"/"PM" if the value names a single session, else None (e.g. legacy
+    "both") — for display in the history detail."""
+    t = (time_of_day or "").strip().upper()
+    return t if t in VALID_SESSIONS else None
+
+
 # --- UC-16: view routine ----------------------------------------------------
 
 @router.get("/")
@@ -94,21 +139,27 @@ async def get_active_routine(user_id: str = Depends(get_current_user_id)):
     )
     steps = steps_res.data or []
 
-    # Attach today's completion state for each step (UC-22 display).
+    # Attach today's completion state for each step, per session (UC-22 display).
     today = date.today().isoformat()
     step_ids = [s["id"] for s in steps]
-    completed_ids = set()
+    done_sessions: dict = {}  # step_id -> set of sessions completed today
     if step_ids:
         comp = (
             supabase.table("routine_step_completions")
-            .select("step_id")
+            .select("step_id, time_of_day")
             .in_("step_id", step_ids)
             .eq("period_key", today)
             .execute()
         )
-        completed_ids = {c["step_id"] for c in (comp.data or [])}
+        for c in (comp.data or []):
+            done_sessions.setdefault(c["step_id"], set()).update(_sessions_for(c.get("time_of_day")))
     for s in steps:
-        s["completed_today"] = s["id"] in completed_ids
+        done = done_sessions.get(s["id"], set())
+        s["completed_am"] = "AM" in done
+        s["completed_pm"] = "PM" in done
+        # Whole-step done = every session it belongs to is ticked (back-compat).
+        belongs = set(_sessions_for(s.get("time_of_day")))
+        s["completed_today"] = bool(belongs) and belongs.issubset(done)
 
     return {"routine": routine, "steps": steps}
 
@@ -288,32 +339,60 @@ async def reorder_steps(req: ReorderRequest, user_id: str = Depends(get_current_
 
 @router.post("/steps/{step_id}/complete")
 async def complete_step(step_id: str, req: CompleteStepRequest, user_id: str = Depends(get_current_user_id)):
-    if not _owns_step(step_id, user_id):
+    step = _owned_step(step_id, user_id)
+    if not step:
         raise HTTPException(status_code=404, detail="Step not found.")
     period_key = req.period_key or date.today().isoformat()
+
+    # Which session is being ticked. A "both" step is two daily tasks, so the
+    # client says which one; an AM- or PM-only step infers it; a "both" step
+    # with no session marks the whole day via the legacy "both" marker.
+    session = (req.time_of_day or "").strip().upper()
+    if session and session not in VALID_SESSIONS:  # [E1]
+        raise HTTPException(status_code=400, detail="Invalid session; expected AM or PM.")
+    if not session:
+        step_sessions = _sessions_for(step.get("time_of_day"))
+        session = step_sessions[0] if len(step_sessions) == 1 else "both"
+
     try:
         supabase.table("routine_step_completions").upsert(
             {
                 "step_id": step_id,
                 "user_id": user_id,
                 "period_key": period_key,
+                "time_of_day": session,
+                "product_id": step.get("product_id"),   # denormalised (survives step deletion, UC-27)
+                "frequency": step.get("frequency"),
                 "completed_at": datetime.utcnow().isoformat(),
             },
-            on_conflict="step_id,period_key",
+            on_conflict="step_id,period_key,time_of_day",
         ).execute()
-        return {"message": "Completed", "period_key": period_key}
-    except Exception as e:  # [E1] save fails -> client reverts
+        return {"message": "Completed", "period_key": period_key, "time_of_day": session}
+    except Exception as e:  # [E2] save fails -> client reverts
         print("Complete step error:", e)
         raise HTTPException(status_code=500, detail="Failed to record completion.")
 
 
 @router.delete("/steps/{step_id}/complete")
-async def uncomplete_step(step_id: str, period_key: Optional[str] = None, user_id: str = Depends(get_current_user_id)):
+async def uncomplete_step(
+    step_id: str,
+    period_key: Optional[str] = None,
+    time_of_day: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+):
     if not _owns_step(step_id, user_id):
         raise HTTPException(status_code=404, detail="Step not found.")
     pk = period_key or date.today().isoformat()
-    supabase.table("routine_step_completions").delete() \
-        .eq("step_id", step_id).eq("period_key", pk).execute()
+    query = (
+        supabase.table("routine_step_completions").delete()
+        .eq("step_id", step_id).eq("period_key", pk)
+    )
+    # Undo only the named session; with none given, clear the whole day (the
+    # AM- or PM-only case, and legacy callers).
+    session = (time_of_day or "").strip().upper()
+    if session:
+        query = query.eq("time_of_day", session)
+    query.execute()
     return {"message": "Completion removed", "period_key": pk}
 
 
@@ -352,7 +431,7 @@ async def get_adherence(weeks: int = 8, user_id: str = Depends(get_current_user_
     # 2. Everything the user has actually ticked in the window.
     comps = (
         supabase.table("routine_step_completions")
-        .select("step_id, product_id, period_key")
+        .select("step_id, product_id, period_key, time_of_day")
         .eq("user_id", user_id)
         .gte("period_key", start.isoformat())
         .lte("period_key", today.isoformat())
@@ -379,38 +458,55 @@ async def get_adherence(weeks: int = 8, user_id: str = Depends(get_current_user_
     for c in completions:
         by_day.setdefault(c["period_key"], []).append(c)
 
-    # 3. Classify every day in the window.
+    # 3. Classify every day in the window, per session. A "both" product is two
+    #    daily tasks (AM + PM), so it is due twice and can be half-done — which is
+    #    what makes "did the morning, skipped the evening" show as a partial day.
     days: dict = {}
     cursor = start
     while cursor <= today:
         key = cursor.isoformat()
-        due = [st for st in steps if schedule_service.is_due(st.get("frequency"), cursor)]
-        done_ids = {c["step_id"] for c in by_day.get(key, []) if c.get("step_id")}
 
-        completed = [{"step_id": st["id"], "product_name": step_names[st["id"]]}
-                     for st in due if st["id"] in done_ids]
-        missed = [{"step_id": st["id"], "product_name": step_names[st["id"]]}
-                  for st in due if st["id"] not in done_ids]
+        # Due (step, session) units for this day.
+        due_units = []
+        for st in steps:
+            if not schedule_service.is_due(st.get("frequency"), cursor):
+                continue
+            for sess in _sessions_for(st.get("time_of_day")):
+                due_units.append((st["id"], sess))
+
+        # Sessions actually ticked, for steps still in the routine. A legacy
+        # "both" completion satisfies both sessions.
+        done_units = set()
+        for c in by_day.get(key, []):
+            if c.get("step_id") in step_names:
+                for sess in _sessions_for(c.get("time_of_day")):
+                    done_units.add((c["step_id"], sess))
+
+        completed = [{"step_id": sid, "session": sess, "product_name": step_names[sid]}
+                     for (sid, sess) in due_units if (sid, sess) in done_units]
+        missed = [{"step_id": sid, "session": sess, "product_name": step_names[sid]}
+                  for (sid, sess) in due_units if (sid, sess) not in done_units]
 
         # Ticked that day but no longer part of the routine — still real history.
         also = [
-            {"step_id": None, "product_name": orphan_names.get(c.get("product_id"), "Removed product")}
+            {"step_id": None, "session": _session_label(c.get("time_of_day")),
+             "product_name": orphan_names.get(c.get("product_id"), "Removed product")}
             for c in by_day.get(key, [])
             if c.get("step_id") not in step_names
         ]
 
-        if not due:  # [SRS-104] a rest day is not a miss
+        if not due_units:  # [SRS-104] a rest day is not a miss
             status = "none"
         elif not completed:
             status = "missed"
-        elif len(completed) == len(due):
+        elif len(completed) == len(due_units):
             status = "complete"
         else:
             status = "partial"
 
         days[key] = {
             "status": status,
-            "due": len(due),
+            "due": len(due_units),
             "done": len(completed),
             "completed": completed,
             "missed": missed,
