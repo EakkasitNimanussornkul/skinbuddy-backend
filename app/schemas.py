@@ -224,6 +224,11 @@ class ReorderRequest(BaseModel):
 
 class CompleteStepRequest(BaseModel):
     period_key: Optional[str] = None
+    # UC-22: which session ("AM"/"PM") is being ticked. A product set to "both"
+    # is one step but two daily tasks, so the session must be recorded to tell
+    # "did the morning" from "did the evening". Optional for back-compat: an
+    # AM- or PM-only step infers it; a "both" step without one marks the day.
+    time_of_day: Optional[str] = None
 
 # 10. WEEKLY SKIN ANALYSIS LOG SCHEMAS
 class SymptomEntry(BaseModel):
