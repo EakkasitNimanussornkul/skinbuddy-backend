@@ -166,6 +166,24 @@ def test_select_still_filters_limits_and_singles(fake_supabase, store):
     assert fake.table("shelf_items").select("*").eq("id", "item-b").single().execute().data["id"] == "item-b"
 
 
+def test_single_raises_pgrst116_on_zero_rows_like_the_real_client(fake_supabase, store):
+    """Raises APIError with code PGRST116 when the filters match nothing, which
+    is what supabase-py's .single() does rather than returning empty data.
+
+    This is the floor under every zero-row test in the suite. The fake used to
+    return None here, and that leniency hid live defects behind green tests -
+    GET /products/compare answered 400 for an unknown product id while its 404
+    test passed. Nothing in app/ uses .single() any more, so no application
+    test can catch a regression here; this one has to."""
+    from postgrest.exceptions import APIError
+
+    fake = fake_supabase(store)
+    with pytest.raises(APIError) as excinfo:
+        fake.table("shelf_items").select("*").eq("id", "does-not-exist").single().execute()
+
+    assert excinfo.value.code == "PGRST116"
+
+
 def test_unknown_builder_methods_still_no_op(fake_supabase, store):
     """Continues the chain for builder methods the fake does not model (order,
     range, gte, ...), so a handler using them still works."""

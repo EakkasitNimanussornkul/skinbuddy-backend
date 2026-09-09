@@ -75,6 +75,23 @@ def test_search_computes_a_skin_match_score_when_authenticated(client, patch_sup
     assert any("Barrier-repair" in r for r in result["match_reasons"])
 
 
+def test_search_still_answers_when_the_callers_profile_row_is_missing(client, patch_supabase):
+    """Returns HTTP 200 and an unpersonalised result for an authenticated caller
+    who has no row in users, rather than failing the whole catalogue search.
+
+    Regression guard: the profile lookup used .single(), which the real client
+    raises PGRST116 on for zero rows, and the handler's generic clause reported
+    that as a 500. A missing profile means there is no skin type to score
+    against, which is what the empty fallback already meant."""
+    from app.main import app
+    app.dependency_overrides[get_optional_user_id] = lambda: "user-with-no-row"
+    patch_supabase({"products": [CLEANSER], "users": []}, "app.api.products")
+
+    resp = client.get("/products/search")
+    assert resp.status_code == 200
+    assert resp.json()[0]["skin_match_score"] is None
+
+
 def test_search_safety_flags_survive_the_full_http_round_trip(client, patch_supabase):
     """Returns alcohol_free=True and fungal_safe=True for a Phenoxyethanol and
     Glycerin formula, confirming the corrected flag logic survives serialisation

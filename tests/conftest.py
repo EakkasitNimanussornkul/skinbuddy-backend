@@ -26,6 +26,7 @@ os.environ.update({
 })
 
 import pytest  # noqa: E402
+from postgrest.exceptions import APIError  # noqa: E402
 
 
 # --- Fake Supabase client ----------------------------------------------------
@@ -142,10 +143,29 @@ class FakeQuery:
         if self._limit is not None:
             matched = matched[:self._limit]
         if self._single:
-            # NOTE: the real .single() RAISES on zero rows rather than returning
-            # empty data. The fake is deliberately lenient here; tests that care
-            # about the zero-row path must exercise the real client.
-            return FakeResponse(matched[0] if matched else None)
+            # The real .single() RAISES APIError PGRST116 on zero rows rather
+            # than returning empty data, so the fake does too.
+            #
+            # It used to return None here and carry a note saying tests that
+            # cared about the zero-row path had to exercise the real client.
+            # That is not something a unit suite can do, so in practice nothing
+            # checked it, and the leniency hid live defects behind green tests:
+            # BE-DEF-07 was one, and resolve_product_record was still returning
+            # 400 instead of 404 for an unknown product id while a test asserted
+            # the 404 and passed.
+            #
+            # A handler that must tolerate a missing row should not use
+            # .single() at all - use .limit(1) and read res.data[0] if present,
+            # which needs no exception handling and behaves the same here as in
+            # production.
+            if not matched:
+                raise APIError({
+                    "message": "Cannot coerce the result to a single JSON object",
+                    "code": "PGRST116",
+                    "hint": None,
+                    "details": "The result contains 0 rows",
+                })
+            return FakeResponse(matched[0])
         return FakeResponse(matched)
 
 

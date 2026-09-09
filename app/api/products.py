@@ -137,9 +137,17 @@ async def resolve_product_record(identifier: str) -> dict or None:
     
     # 1. Check if identifier is a direct UUID
     if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', clean_id):
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", clean_id).single().execute()
+        # .limit(1), not .single(): the real client's .single() RAISES
+        # APIError PGRST116 on zero rows, so the `if res.data` guard below was
+        # unreachable for a well-formed UUID that matches no catalogue row. The
+        # exception escaped this helper into its callers' generic clauses, and
+        # GET /products/compare answered 400 for an unknown product id while
+        # its test asserted 404 and passed - the fake used to return None here
+        # rather than raising. Same defect as BE-DEF-07, missed in that sweep
+        # because this helper resolves the row rather than the handlers do.
+        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", clean_id).limit(1).execute()
         if res.data:
-            return res.data
+            return res.data[0]
 
     # 1b. Indexed exact-slug lookup (fast path for the common case, avoids the
     # full-catalog fetch-and-loop below). Falls through if the products.slug
@@ -253,8 +261,13 @@ async def search_products(
     try:
         user_skin_type = ""
         if user_id:
-            user_res = supabase.table("users").select("skin_type").eq("id", user_id).single().execute()
-            user_skin_type = user_res.data.get("skin_type", "") if user_res.data else ""
+            # .limit(1), not .single(): an authenticated caller whose users row
+            # is missing raised PGRST116 here, and the generic clause below
+            # reported it as a 500 for the whole catalogue search. A missing
+            # profile means "no skin type to personalise with", which is the
+            # empty string this already falls back to. BE-DEF-07's class.
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
+            user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
         query = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
         if q:
