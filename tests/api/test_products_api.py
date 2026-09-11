@@ -113,6 +113,127 @@ def test_search_with_no_matching_products_returns_an_empty_list(client, patch_su
     assert resp.json() == []
 
 
+# --- Ranking ------------------------------------------------------------------
+#
+# search_products assigns rank 1 to a query found in the product name, 2 to one
+# found only in the brand, and 3 to everything else, then sorts by it. The
+# PostgREST or_ filter that selects the rows is a no-op in the fake, so every
+# seeded product comes back and these tests see ordering alone - which is what
+# they are about. Selection is covered by the capture_or tests below.
+
+def priced(pid, brand, name, price_thb):
+    row = product(pid, brand, name, "Serum", [GLYCERIN])
+    row["price_thb"] = price_thb
+    return row
+
+
+def names_from(resp):
+    return [p["name"] for p in resp.json()]
+
+
+def test_search_ranks_a_name_match_above_a_brand_match_above_neither(client, patch_supabase):
+    """Returns the product whose name contains the query first, the one whose
+    brand contains it second, and the one matching neither last.
+
+    Seeded in the opposite order, so passing requires the sort to have reordered
+    them rather than the store to have been listed conveniently."""
+    patch_supabase({"products": [
+        priced("p-none", "The Ordinary", "Niacinamide 10% + Zinc 1%", 500),
+        priced("p-brand", "CeraVe", "Moisturising Lotion", 500),
+        priced("p-name", "Generic Labs", "CeraVe Style Cleanser", 500),
+    ]}, "app.api.products")
+
+    resp = client.get("/products/search", params={"q": "cerave"})
+    assert resp.status_code == 200
+    assert names_from(resp) == [
+        "CeraVe Style Cleanser",      # rank 1, name
+        "Moisturising Lotion",        # rank 2, brand
+        "Niacinamide 10% + Zinc 1%",  # rank 3, neither
+    ]
+
+
+def test_search_ranks_a_product_matching_both_fields_by_its_name_match(client, patch_supabase):
+    """Returns a product whose name and brand both contain the query ahead of
+    one matching on brand alone.
+
+    The two rank branches are if/elif on the same query, so a product matching
+    both takes the name rank. Without this, swapping them to elif/if would go
+    unnoticed."""
+    patch_supabase({"products": [
+        priced("p-brand", "CeraVe", "Moisturising Lotion", 500),
+        priced("p-both", "CeraVe", "CeraVe Foaming Cleanser", 500),
+    ]}, "app.api.products")
+
+    resp = client.get("/products/search", params={"q": "cerave"})
+    assert names_from(resp) == ["CeraVe Foaming Cleanser", "Moisturising Lotion"]
+
+
+# --- Price bounds -------------------------------------------------------------
+#
+# Unlike or_, gte and lte are implemented in the fake (tests/conftest.py), so
+# these assert which products come back rather than which builder calls were
+# made.
+
+PRICE_CATALOGUE = [
+    priced("p-cheap", "Brand A", "Budget Cleanser", 250),
+    priced("p-mid", "Brand B", "Mid Serum", 600),
+    priced("p-dear", "Brand C", "Premium Cream", 1200),
+]
+
+
+def test_search_excludes_products_below_min_price(client, patch_supabase):
+    """Returns only products priced at or above min_price, with the bound
+    inclusive."""
+    patch_supabase({"products": PRICE_CATALOGUE}, "app.api.products")
+
+    resp = client.get("/products/search", params={"min_price": 600})
+    assert resp.status_code == 200
+    assert sorted(names_from(resp)) == ["Mid Serum", "Premium Cream"]
+
+
+def test_search_excludes_products_above_max_price(client, patch_supabase):
+    """Returns only products priced at or below max_price, with the bound
+    inclusive."""
+    patch_supabase({"products": PRICE_CATALOGUE}, "app.api.products")
+
+    resp = client.get("/products/search", params={"max_price": 600})
+    assert resp.status_code == 200
+    assert sorted(names_from(resp)) == ["Budget Cleanser", "Mid Serum"]
+
+
+def test_search_applies_both_price_bounds_together(client, patch_supabase):
+    """Returns only the product inside the band when min_price and max_price are
+    both supplied, so the two filters combine rather than one replacing the
+    other."""
+    patch_supabase({"products": PRICE_CATALOGUE}, "app.api.products")
+
+    resp = client.get("/products/search", params={"min_price": 400, "max_price": 900})
+    assert names_from(resp) == ["Mid Serum"]
+
+
+def test_search_returns_an_empty_list_when_no_product_is_in_the_price_band(
+        client, patch_supabase):
+    """Returns HTTP 200 and an empty list, not a 404, when the bounds exclude
+    every product."""
+    patch_supabase({"products": PRICE_CATALOGUE}, "app.api.products")
+
+    resp = client.get("/products/search", params={"min_price": 2000})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_search_without_price_bounds_returns_every_product(client, patch_supabase):
+    """Returns all three products when neither bound is supplied, confirming the
+    filters are applied only when the caller asks for them.
+
+    Positive control for the four cases above, which would all pass against an
+    endpoint that returned nothing at all."""
+    patch_supabase({"products": PRICE_CATALOGUE}, "app.api.products")
+
+    resp = client.get("/products/search")
+    assert len(resp.json()) == 3
+
+
 @pytest.fixture
 def capture_or(monkeypatch):
     """Record the expression handed to PostgREST's or_().
@@ -269,6 +390,94 @@ def test_compare_works_without_authentication(client, conflicting_catalog):
                       params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID})
     assert resp.status_code == 200
     assert resp.json()["product_a"]["skin_match_score"] is None
+
+
+ALCOHOL = {"id": "ing-alc", "name": "Alcohol Denat.", "functional_group": "Solvent"}
+
+
+@pytest.fixture
+def overlapping_catalog(patch_supabase):
+    """Two products sharing one ingredient of three distinct ones, so similarity
+    is neither 0 nor 100."""
+    store = _compare_store([], [])
+    store["products"] = [
+        product(PROD_A_ID, "The Ordinary", "Retinol 0.2% in Squalane", "Serum",
+                [RETINOL, GLYCERIN]),
+        product(PROD_B_ID, "Paula's Choice", "2% BHA Liquid Exfoliant", "Exfoliant",
+                [SALICYLIC, GLYCERIN]),
+    ]
+    return patch_supabase(store, "app.api.products",
+                          "app.core.services.compatibility_service")
+
+
+def test_compare_reports_a_partial_overlap_with_the_shared_ingredient(
+        client, overlapping_catalog):
+    """Returns similarity_score=33.3 and a shared_ingredients list naming the one
+    ingredient both products contain.
+
+    Jaccard over the ingredient id sets: one shared of three distinct. The
+    disjoint case below covers 0.0, but a score that is neither 0 nor 100 is the
+    one that shows the ratio is computed rather than a membership flag."""
+    body = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID}).json()
+
+    assert body["similarity_score"] == 33.3
+    assert [i["name"] for i in body["shared_ingredients"]] == ["Glycerin"]
+
+
+@pytest.fixture
+def scored_catalog(patch_supabase):
+    """Two products a DSPT profile scores differently: a humectant earns +10, a
+    volatile alcohol costs -20."""
+    store = _compare_store([], [])
+    store["products"] = [
+        product(PROD_A_ID, "CeraVe", "Hydrating Lotion", "Moisturizer", [GLYCERIN]),
+        product(PROD_B_ID, "Brand B", "Astringent Toner", "Toner", [ALCOHOL]),
+    ]
+    store["users"] = [{"id": "user-1", "skin_type": "DSPT"}]
+    return patch_supabase(store, "app.api.products",
+                          "app.core.services.compatibility_service")
+
+
+def test_compare_scores_each_product_against_the_callers_skin_type(client, scored_catalog):
+    """Returns skin_match_score=85 for the humectant product and 55 for the
+    alcohol one, for an authenticated DSPT caller.
+
+    Both are computed from the same profile but from each product's own
+    ingredients, so the two scores must differ. Asserting only that they are
+    non-null would pass against a handler that scored product A twice."""
+    from app.main import app
+    app.dependency_overrides[get_optional_user_id] = lambda: "user-1"
+
+    body = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID}).json()
+
+    assert body["product_a"]["skin_match_score"] == 85   # 75 base + 10 humectant
+    assert body["product_b"]["skin_match_score"] == 55   # 75 base - 20 drying alcohol
+
+
+def test_compare_reports_an_internal_failure_as_a_400(client, patch_supabase, monkeypatch):
+    """Returns HTTP 400 with the detail "Failed to compare products." when the
+    handler raises something other than an HTTPException.
+
+    Distinct from the 404 below, which is a resolved outcome rather than a
+    failure. The handler re-raises HTTPException ahead of its generic clause, so
+    this asserts the generic clause is still reachable by everything else."""
+    import app.api.products as products_module
+
+    patch_supabase({"products": [], "users": []}, "app.api.products",
+                   "app.core.services.compatibility_service")
+
+    def explode(*_a, **_k):
+        raise RuntimeError("connection string postgres://user:hunter2@db.internal")
+
+    monkeypatch.setattr(products_module.supabase, "table", explode)
+
+    resp = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Failed to compare products."
+    assert "hunter2" not in resp.text
 
 
 def test_compare_reports_zero_similarity_for_disjoint_formulas(client, conflicting_catalog):

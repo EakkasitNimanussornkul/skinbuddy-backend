@@ -51,7 +51,7 @@ class FakeQuery:
         self._table_name = table_name
         self._store = store
         self._single = False
-        self._filters = []   # (column, value, negated)
+        self._filters = []   # (column, value, operator name)
         self._limit = None
         # Write intent, resolved in execute(). These MUST be initialised here:
         # __getattr__ answers unknown names with a chain function, so a missing
@@ -63,17 +63,31 @@ class FakeQuery:
         self._pending_delete = False
 
     # Filters the tests actually depend on are implemented for real; everything
-    # else (select/or_/gte/lte/order/...) is a no-op that continues the chain.
+    # else (select/or_/order/...) is a no-op that continues the chain.
     #
     # select() in particular stays a no-op on purpose: the handlers pass
     # PostgREST join strings like "*, products(*, product_ingredients(...))".
     # The fake cannot resolve joins, so tests seed the already-joined shape.
     def eq(self, column, value):
-        self._filters.append((column, value, False))
+        self._filters.append((column, value, "eq"))
         return self
 
     def neq(self, column, value):
-        self._filters.append((column, value, True))
+        self._filters.append((column, value, "neq"))
+        return self
+
+    # gte/lte are real rather than no-ops because GET /products/search's price
+    # bounds are applied through them. While they continued the chain untouched,
+    # every seeded product came back whatever bounds were sent, so a price test
+    # could only have asserted that the handler called the builder - a mock
+    # assertion, true of a handler that filters and equally true of one that
+    # does not.
+    def gte(self, column, value):
+        self._filters.append((column, value, "gte"))
+        return self
+
+    def lte(self, column, value):
+        self._filters.append((column, value, "lte"))
         return self
 
     def limit(self, n):
@@ -107,9 +121,22 @@ class FakeQuery:
         return _chain
 
     def _matching(self, rows):
-        for column, value, negated in self._filters:
-            rows = [r for r in rows if (r.get(column) != value) == negated]
+        for column, value, op in self._filters:
+            rows = [r for r in rows if self._holds(r.get(column), value, op)]
         return rows
+
+    @staticmethod
+    def _holds(actual, value, op):
+        if op == "eq":
+            return actual == value
+        if op == "neq":
+            return actual != value
+        # A NULL never satisfies a range comparison in SQL, and Python would
+        # raise TypeError comparing None to a number rather than excluding the
+        # row. Answer the way Postgres does.
+        if actual is None:
+            return False
+        return actual >= value if op == "gte" else actual <= value
 
     def execute(self):
         if self._pending_insert is not None:
