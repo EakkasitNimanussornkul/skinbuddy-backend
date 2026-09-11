@@ -88,7 +88,14 @@ async def update_me(payload: UserUpdateRequest, user_id: str = Depends(get_curre
         
         if not response.data:
             raise HTTPException(status_code=404, detail="User not found or update failed")
-            
+
         return response.data[0]
+    except HTTPException:
+        # Ahead of the generic clause below, which catches HTTPException too and
+        # re-raised the 404 above as a 500 carrying it as text:
+        # "Database error: 404: User not found or update failed". A user who is
+        # not there is not a database failure. BE-DEF-02's trap; this handler
+        # never got the guard the shelf, products, quiz and routine handlers have.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
