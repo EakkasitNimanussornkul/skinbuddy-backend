@@ -203,6 +203,133 @@ def test_analyze_reports_safe_when_the_shelf_is_empty(client, patch_supabase, as
     assert resp.json() == {"is_safe": True, "warnings": [], "duplicates": []}
 
 
+# --- Skin-type conflicts, and them coexisting with the other passes ----------
+#
+# analyze() matches the literal substring "(D)" / "(S)" / etc. inside an
+# ingredient's bad_for against the letters of the caller's Baumann code. That
+# marker convention is pinned by tests/unit/test_ingredient_dictionary.py, and
+# compute_baumann_compatibility's 15-99 score is pinned by
+# test_baumann_scoring.py - but neither is this check, and neither proves this
+# endpoint wires the caller's skin type into it. These do.
+#
+# bad_for is shaped as the live catalogue shapes it: the real Salicylic Acid row
+# carries "Extremely Dry Skin (D)".
+
+SALICYLIC_BAD_FOR_DRY = {
+    "id": "ing-sa", "name": "Salicylic Acid",
+    "functional_group": "Beta Hydroxy Acid (BHA)",
+    "bad_for": "Extremely Dry Skin (D)",
+}
+
+BHA_TARGET = {
+    "id": "prod-bha",
+    "name": "2% BHA Liquid Exfoliant",
+    "category": "Exfoliant",
+    "product_ingredients": [{"ingredients": SALICYLIC_BAD_FOR_DRY}],
+}
+
+RETINOID_SHELF_PRODUCT = joined_product("Retinol 0.2% in Squalane", "ing-retinol",
+                                        "Retinol", "Retinoid")
+
+
+def skin_type_store(skin_type, shelf_items, conflict_rules=None, category_rules=None):
+    return {
+        "shelf_items": shelf_items,
+        "products": [BHA_TARGET],
+        "users": [{"id": "user-1", "skin_type": skin_type}],
+        "conflict_rules": conflict_rules or [],
+        "category_conflict_rules": category_rules or [],
+    }
+
+
+def test_analyze_raises_a_skin_type_conflict_for_the_callers_baumann_code(
+        client, patch_supabase, as_user):
+    """Returns is_safe=False and a Skin Type Conflict warning naming the
+    ingredient and the caller's Baumann type, when a target ingredient's bad_for
+    carries a marker matching a letter of that code.
+
+    The target's Salicylic Acid is bad_for "Extremely Dry Skin (D)" and the
+    caller is DSPT, so the (D) marker matches. The shelf is empty, which isolates
+    this pass from the two comparison passes."""
+    as_user("user-1")
+    patch_supabase(skin_type_store("DSPT", []),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/prod-bha")
+    assert resp.status_code == 200
+
+    body = resp.json()
+    assert body["is_safe"] is False
+    assert alert_types(resp) == {"Skin Type Conflict"}
+
+    message = body["warnings"][0]["message"]
+    assert "Salicylic Acid" in message
+    assert "DSPT" in message
+    assert body["warnings"][0]["severity"] == "High"
+
+
+def test_analyze_raises_no_skin_type_conflict_when_the_marker_does_not_match(
+        client, patch_supabase, as_user):
+    """Returns is_safe=True and no warnings for the same product when the caller
+    is ORNT, whose four letters do not include the (D) the ingredient is marked
+    against.
+
+    Negative control: without it the test above would pass just as well against
+    an endpoint that warned for every ingredient carrying any bad_for text."""
+    as_user("user-1")
+    patch_supabase(skin_type_store("ORNT", []),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/prod-bha")
+    assert resp.status_code == 200
+    assert resp.json()["is_safe"] is True
+    assert resp.json()["warnings"] == []
+
+
+def test_analyze_surfaces_a_skin_type_and_a_category_conflict_together(
+        client, patch_supabase, as_user):
+    """Returns both a Skin Type Conflict and an Active Routine Clash on one
+    request, when the target clashes with the caller's Baumann code and also
+    with a product active on their shelf.
+
+    The two findings come from different passes over different inputs - the
+    target's own ingredient rows, and the comparison set - and neither may
+    suppress the other."""
+    as_user("user-1")
+    patch_supabase(
+        skin_type_store("DSPT", [shelf_row("item-1", "user-1", "active", RETINOID_SHELF_PRODUCT)],
+                        category_rules=[RETINOID_VS_BHA_RULE]),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-bha")
+    assert resp.status_code == 200
+    assert resp.json()["is_safe"] is False
+    assert alert_types(resp) == {"Skin Type Conflict", "Active Routine Clash"}
+
+
+def test_analyze_surfaces_a_skin_type_and_an_ingredient_pair_conflict_together(
+        client, patch_supabase, as_user):
+    """Returns both a Skin Type Conflict and a Chemical Interaction Warning on
+    one request.
+
+    The companion to the case above, for the curated ingredient-pair pass rather
+    than the functional-group one. Run with no category rule, so the pair rule is
+    the only source of the second warning and BE-DEF-13's suppression cannot be
+    what produces the count."""
+    as_user("user-1")
+    patch_supabase(
+        skin_type_store("DSPT", [shelf_row("item-1", "user-1", "active", RETINOID_SHELF_PRODUCT)],
+                        conflict_rules=[RETINOL_VS_SA_RULE]),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    resp = client.get("/shelf/analyze/prod-bha")
+    assert resp.status_code == 200
+    assert resp.json()["is_safe"] is False
+    assert alert_types(resp) == {"Skin Type Conflict", "Chemical Interaction Warning"}
+
+
 # --- Each real conflict, stated exactly once (BE-DEF-12, BE-DEF-13) ----------
 
 SECOND_BHA_PRODUCT = joined_product("Exfoliating Toner", "ing-sa", "Salicylic Acid",
