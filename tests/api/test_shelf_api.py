@@ -1101,6 +1101,33 @@ def test_open_preserves_an_existing_pao_when_the_request_omits_it(client, patch_
     assert stored_item(fake, "item-1")["pao"] == 6
 
 
+def test_open_clears_an_existing_expiration_date_when_the_request_sends_null(
+        client, patch_supabase, as_user):
+    """Stores expiration_date as null when the request supplies null, clearing a
+    date the item already carried, and returns the row showing it cleared.
+
+    The contrast with pao directly above is the whole point. Both are
+    Optional[str]/Optional[int] on the same request model, and the handler treats
+    them differently: pao is written only `if req.pao is not None`, so omitting
+    it preserves what was there, while expiration_date is written
+    unconditionally, so sending null erases it. The item is seeded with an
+    existing date rather than none, because null-in-null-out would hold either
+    way and would not show that."""
+    as_user("user-1")
+    store = {"shelf_items": [
+        shelf_row("item-1", "user-1", "unopened", expiration_date="2027-02-01"),
+        shelf_row("item-2", "user-2", "unopened", pao=6),
+    ]}
+    fake = patch_supabase(store, "app.api.shelf")
+
+    resp = client.patch("/shelf/item-1/open",
+                        json={"opened_date": "2026-08-01", "expiration_date": None})
+    assert resp.status_code == 200
+
+    assert stored_item(fake, "item-1")["expiration_date"] is None
+    assert resp.json()["expiration_date"] is None
+
+
 def test_open_does_not_modify_another_users_item(client, patch_supabase, as_user):
     """Leaves a different user's item entirely unchanged — still unopened, with
     its original pao — when the caller targets that item's id."""
