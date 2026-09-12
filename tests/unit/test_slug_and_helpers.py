@@ -10,6 +10,7 @@ from app.core.utils import create_slug
 from app.api.products import postgrest_quote
 from app.core.services.compatibility_service import (
     _build_comparison_maps,
+    compute_ingredient_similarity,
     normalize_product,
     normalize_text_accents,
 )
@@ -125,6 +126,65 @@ def test_build_comparison_maps_skips_ingredients_without_a_group():
     groups, ingredient_ids = _build_comparison_maps(products)
     assert groups == {}
     assert ingredient_ids == {"i1": ["P"]}
+
+
+# --- compute_ingredient_similarity -------------------------------------------
+#
+# Jaccard over ingredient ID sets. Exercised throughout the suite via compare,
+# the similar-products ranking and dupe detection, but those all reach it
+# through a handler; these state its own contract.
+
+
+def ings(*ids):
+    return [{"id": i, "name": i.upper()} for i in ids]
+
+
+def test_similarity_of_identical_ingredient_sets_is_100():
+    """Returns 100.0 for two products whose ingredient ids are the same set."""
+    assert compute_ingredient_similarity(ings("a", "b", "c"), ings("a", "b", "c")) == 100.0
+
+
+def test_similarity_of_disjoint_ingredient_sets_is_zero():
+    """Returns 0.0 when the two products share no ingredient."""
+    assert compute_ingredient_similarity(ings("a", "b"), ings("c", "d")) == 0.0
+
+
+def test_similarity_is_the_intersection_over_the_union():
+    """Returns 50.0 for {a,b,c} against {b,c,d}: two shared over a union of
+    four. Jaccard, not the share of either list on its own."""
+    assert compute_ingredient_similarity(ings("a", "b", "c"), ings("b", "c", "d")) == 50.0
+
+
+def test_similarity_is_rounded_to_one_decimal_place():
+    """Returns 33.3 for one shared ingredient over a union of three, rather than
+    the unrounded 33.33... The value is rendered as a percentage."""
+    assert compute_ingredient_similarity(ings("a", "b"), ings("b", "c")) == 33.3
+
+
+def test_similarity_ignores_ingredients_carrying_no_id():
+    """Returns 100.0 when the only difference between two lists is an entry with
+    no id, since the comparison is over ids and an entry without one cannot be
+    matched against anything."""
+    a = ings("a", "b") + [{"name": "Unidentified"}]
+    assert compute_ingredient_similarity(a, ings("a", "b")) == 100.0
+
+
+def test_similarity_of_two_empty_lists_is_zero_not_a_missing_answer():
+    """Returns 0.0 when neither product has ingredient rows.
+
+    Deliberate, and worth stating because the value is ambiguous: 0.0 here means
+    "there was nothing to compare", which is not the same answer as two
+    populated products sharing nothing. The function keeps returning a float
+    because callers feed it to a `<` threshold and a sort key; a caller that
+    displays the figure has to separate the two cases from the ingredient lists
+    it already has."""
+    assert compute_ingredient_similarity([], []) == 0.0
+
+
+def test_similarity_with_one_empty_list_is_a_true_zero():
+    """Returns 0.0 when one product has ingredients and the other has none,
+    which unlike the case above is a real share-nothing result."""
+    assert compute_ingredient_similarity(ings("a", "b"), []) == 0.0
 
 
 # --- postgrest_quote (BE-DEF-06) ---------------------------------------------

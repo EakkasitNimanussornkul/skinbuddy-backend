@@ -598,6 +598,93 @@ def test_slug_similar_products_carry_the_fields_the_widget_renders(client, patch
     assert entry["slug"] == "brand-t-twin-serum"
 
 
+# --- GET /products/slug/{slug} — the resolved product itself -----------------
+#
+# The cases above all assert on similar_products. These assert on the target
+# product the route resolved: its own display fields, and the two failure
+# outcomes.
+#
+# SLUG_TARGET carries a real `slug` value, unlike the product() default of None.
+# That matters: resolve_product_record tries an indexed exact-slug lookup before
+# falling back to a full scan, and with every seeded product carrying slug=None
+# that fast path never returned a hit under test.
+
+SLUG_TARGET = product("slug-target-id", "CeraVe", "Hydrating Cleanser", "Cleanser",
+                      [GLYCERIN, PHENOXY])
+SLUG_TARGET["slug"] = "cerave-hydrating-cleanser"
+
+TARGET_SLUG = "cerave-hydrating-cleanser"
+
+
+def test_slug_omits_personalisation_for_an_anonymous_caller(client, patch_supabase):
+    """Returns skin_match_score=None with empty match and caution reasons, and a
+    fully populated safety_flags object, for an unauthenticated caller.
+
+    safety_flags is computed from the product's ingredients alone, so it is
+    present with or without a caller; the score is not."""
+    patch_supabase({"products": [SLUG_TARGET], "users": []}, "app.api.products")
+
+    body = client.get(f"/products/slug/{TARGET_SLUG}").json()
+
+    assert body["skin_match_score"] is None
+    assert body["match_reasons"] == []
+    assert body["caution_reasons"] == []
+    assert body["safety_flags"]["paraben_free"] is True
+
+
+def test_slug_scores_the_resolved_product_for_an_authenticated_caller(client, patch_supabase):
+    """Returns skin_match_score=85 and a barrier-repair match reason for a DSPT
+    caller, applying the +10 humectant bonus on the Dry axis to the resolved
+    product's own ingredients.
+
+    The personalising branch of this route - the users lookup feeding
+    compute_product_display_fields - was previously never taken by any test."""
+    from app.main import app
+    app.dependency_overrides[get_optional_user_id] = lambda: "user-1"
+    patch_supabase(
+        {"products": [SLUG_TARGET], "users": [{"id": "user-1", "skin_type": "DSPT"}]},
+        "app.api.products",
+    )
+
+    body = client.get(f"/products/slug/{TARGET_SLUG}").json()
+
+    assert body["skin_match_score"] == 85   # 75 base + 10 humectant
+    assert any("Barrier-repair" in r for r in body["match_reasons"])
+
+
+def test_slug_404s_for_an_identifier_that_resolves_to_nothing(client, patch_supabase):
+    """Returns HTTP 404 naming the slug it could not resolve, rather than a 200
+    carrying a null body.
+
+    This route has its own 404, separate from the one on GET /products/{id}."""
+    patch_supabase({"products": [SLUG_TARGET], "users": []}, "app.api.products")
+
+    resp = client.get("/products/slug/no-such-product")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Product matching slug 'no-such-product' not found."
+
+
+def test_slug_reports_an_internal_failure_as_a_500(client, patch_supabase, monkeypatch):
+    """Returns HTTP 500 with the generic body "Failed to fetch product." and no
+    trace of the internal exception text, when the query raises.
+
+    The handler re-raises HTTPException ahead of its generic clause, so this
+    also confirms the generic clause is still reachable by everything else."""
+    import app.api.products as products_module
+
+    patch_supabase({"products": [SLUG_TARGET], "users": []}, "app.api.products")
+
+    def explode(*_a, **_k):
+        raise RuntimeError("connection string postgres://user:hunter2@db.internal")
+
+    monkeypatch.setattr(products_module.supabase, "table", explode)
+
+    resp = client.get(f"/products/slug/{TARGET_SLUG}")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to fetch product."
+    assert "hunter2" not in resp.text
+
+
 # --- Error-message hygiene ---------------------------------------------------
 
 # --- GET /products/{product_id} (BE-DEF-07) ----------------------------------
