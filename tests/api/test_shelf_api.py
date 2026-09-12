@@ -262,9 +262,15 @@ def test_analyze_raises_a_skin_type_conflict_for_the_callers_baumann_code(
     assert body["is_safe"] is False
     assert alert_types(resp) == {"Skin Type Conflict"}
 
-    message = body["warnings"][0]["message"]
-    assert "Salicylic Acid" in message
-    assert "DSPT" in message
+    # The whole string, not substrings. Asserting only that the ingredient and
+    # the code appear would still pass if the wording lost "Personalized Alert:"
+    # or stopped saying what the alert is about - and this sentence is rendered
+    # to the user verbatim, so its shape is the behaviour, not an implementation
+    # detail.
+    assert body["warnings"][0]["message"] == (
+        "Personalized Alert: Salicylic Acid is known to trigger adverse "
+        "reactions for Baumann Type DSPT."
+    )
     assert body["warnings"][0]["severity"] == "High"
 
 
