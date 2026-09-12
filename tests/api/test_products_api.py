@@ -456,6 +456,49 @@ def test_compare_scores_each_product_against_the_callers_skin_type(client, score
     assert body["product_b"]["skin_match_score"] == 55   # 75 base - 20 drying alcohol
 
 
+# Shaped as the live catalogue shapes bad_for, e.g. "Extremely Dry Skin (D)";
+# the skin-type pass matches on the parenthesised letter.
+IRRITANT = {"id": "ing-irritant", "name": "Denatured Alcohol",
+            "functional_group": "Solvent", "bad_for": "Extremely Dry Skin (D)"}
+
+
+@pytest.fixture
+def one_sided_irritant_catalog(patch_supabase):
+    """A DSPT caller, an inert product A, and a product B carrying an ingredient
+    their skin type reacts to. No conflict rule of any kind, so the skin-type
+    pass is the only thing that can produce a warning."""
+    store = _compare_store([], [])
+    store["products"] = [
+        product(PROD_A_ID, "CeraVe", "Hydrating Lotion", "Moisturizer", [GLYCERIN]),
+        product(PROD_B_ID, "Brand B", "Astringent Toner", "Toner", [IRRITANT]),
+    ]
+    store["users"] = [{"id": "user-1", "skin_type": "DSPT"}]
+    return patch_supabase(store, "app.api.products",
+                          "app.core.services.compatibility_service")
+
+
+def test_compare_reports_a_skin_type_conflict_carried_by_product_b_alone(
+        client, one_sided_irritant_catalog):
+    """Returns a Skin Type Conflict naming product B's ingredient when only
+    product B carries something the caller's skin type reacts to.
+
+    The skin-type pass walks the *target* product's own ingredients, so
+    analyze(A, [B]) never examines B's. The handler makes a second call,
+    analyze(B, []), for exactly this reason, and its warnings are appended to
+    the same conflicts list. Without that call the comparison would report
+    whatever product A triggers and stay silent about product B, so a user
+    would be told a product is fine because the one beside it is."""
+    from app.main import app
+    app.dependency_overrides[get_optional_user_id] = lambda: "user-1"
+
+    conflicts = client.get("/products/compare",
+                           params={"product_a_id": PROD_A_ID,
+                                   "product_b_id": PROD_B_ID}).json()["conflicts"]
+
+    assert [c["alert_type"] for c in conflicts] == ["Skin Type Conflict"]
+    assert "Denatured Alcohol" in conflicts[0]["message"]
+
+
 def test_compare_reports_an_internal_failure_as_a_400(client, patch_supabase, monkeypatch):
     """Returns HTTP 400 with the detail "Failed to compare products." when the
     handler raises something other than an HTTPException.
