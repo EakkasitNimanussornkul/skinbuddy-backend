@@ -10,6 +10,7 @@ Docstrings state the expected output, and are lifted verbatim into the
 import pytest
 
 from app.api.products import compute_baumann_compatibility
+from app.core.services.ingredient_dictionary import parse_ingredient_data
 
 
 def ing(name, group=None):
@@ -74,6 +75,28 @@ def test_oily_skin_rewards_oil_control_actives():
     result = compute_baumann_compatibility("OSPT", [ing("Niacinamide", "Vitamin B3")])
     assert result["score"] == 95  # 75 base + 10 (O) + 10 (P)
     assert len(result["match_reasons"]) == 2
+
+
+# The group is taken from parse_ingredient_data, the function that tags every
+# ingredient at ingest, rather than typed out here. The scorer compares group
+# names as exact strings, so a test that types them can agree with the scorer
+# while the catalogue uses a different name. That is how "Direct Acid (BHA)"
+# passed review: nothing checked it against what the catalogue stores. If either
+# file renames a group, this now fails.
+#
+# ORNT so only the oil-control bonus is in play: R adds its flat +5, and neither
+# acid belongs to a group the N or T axes reward.
+@pytest.mark.parametrize("acid", ["Salicylic Acid", "Glycolic Acid"])
+def test_oily_skin_rewards_the_catalogues_hydroxy_acids(acid):
+    """Returns 90 (base 75 + 5 Resistant + 10 oil control) and an oil-control
+    match reason for a BHA or AHA tagged with the group the catalogue assigns
+    it, scored against an Oily-axis profile."""
+    group = parse_ingredient_data(acid)["group"]
+
+    result = compute_baumann_compatibility("ORNT", [ing(acid, group)])
+
+    assert result["score"] == 90  # 75 base + 5 (R) + 10 (O)
+    assert any("Oil-control" in r for r in result["match_reasons"])
 
 
 # --- Axis 2: Sensitive (S) vs Resistant (R) ----------------------------------

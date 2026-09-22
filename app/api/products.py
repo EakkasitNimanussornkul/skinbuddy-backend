@@ -95,7 +95,19 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
             score -= 20
             caution_reasons.append("Drying risk: High concentrations of volatile alcohols may strip natural barrier moisture.")
     elif "O" in user_skin_type:
-        if any(g in f_groups for g in ["Direct Acid (BHA)", "Direct Acid (AHA/BHA)", "Vitamin B3"]):
+        # The group names must match what the catalogue actually stores, which is
+        # set by ingredient_dictionary.py at ingest. This list checked "Direct
+        # Acid (BHA)" and "Direct Acid (AHA/BHA)", names no ingredient has ever
+        # carried, so the only BHA and AHA products in the catalogue never got
+        # the oil-control bonus while niacinamide, the one name that did match,
+        # did. The old "(AHA/BHA)" shows both acids were meant to count.
+        #
+        # Other axes still name groups the catalogue does not use (Heavy
+        # Occlusive, Barrier Support, Botanical Soother, Peptide, Antioxidant,
+        # Active Acid Component). Mapping those is a judgment about which real
+        # group each was meant to be, not a rename, and is left as a known
+        # limitation.
+        if any(g in f_groups for g in ["Beta Hydroxy Acid (BHA)", "Alpha Hydroxy Acid (AHA)", "Vitamin B3"]):
             score += 10
             match_reasons.append("Oil-control support: Formulated with clarifying actives to regulate excess sebum.")
         if any(g == "Heavy Occlusive" for g in f_groups):
