@@ -371,7 +371,10 @@ async def compare_two_products(
         # comparison) only adds B's own skin-type warnings, so nothing double-counts.
         result_a = compatibility_service.analyze(prod_a["id"], user_id, [compatibility_service.normalize_product(prod_b)])
         result_b = compatibility_service.analyze(prod_b["id"], user_id, [])
-        conflicts = result_a.warnings + result_b.warnings
+        # One card per clashing product, as on the shelf. Every pairwise clash
+        # names product B, so this collapses them into one; result_b holds only
+        # skin-type alerts, which pass through as they are.
+        conflicts = compatibility_service.group_warnings_by_product(result_a.warnings + result_b.warnings)
 
         return CompareResponse(
             product_a=prod_a,
