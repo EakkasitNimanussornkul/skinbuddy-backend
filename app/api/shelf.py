@@ -82,6 +82,9 @@ async def analyze_product_compatibility(product_id: str, user_id: str = Depends(
 
         comparison = compatibility_service.get_active_shelf_products(user_id)
         result = compatibility_service.analyze(product_id, user_id, comparison)
+        # One warning per clashing product rather than per ingredient pair.
+        # is_safe is already decided above, so merging changes no verdict.
+        result.warnings = compatibility_service.group_warnings_by_product(result.warnings)
 
         # Dupe detection ("you already own something like this") is computed
         # here rather than inside analyze(), which is also called by the

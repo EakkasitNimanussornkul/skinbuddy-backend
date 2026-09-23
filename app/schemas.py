@@ -149,10 +149,25 @@ class ShelfItemResponse(BaseModel):
         from_attributes = True
 
 # 7. SAFETY ANALYSIS & COMPARISON SCHEMAS
-class WarningAlert(BaseModel):
-    alert_type: str  # "Biological", "Chemical", "Category Clash", etc.
-    severity: str    # "High", "Moderate", "Low"
+class ConflictDetail(BaseModel):
+    """One ingredient pair behind a conflict with another product."""
+    alert_type: str
+    severity: str
+    ingredient: str                               # the checked product's ingredient(s)
+    conflicting_ingredient: Optional[str] = None  # the other product's ingredient
     message: str
+
+
+class WarningAlert(BaseModel):
+    alert_type: str  # "Skin Type Conflict", "Chemical Interaction Warning", "Active Routine Clash"
+    severity: str    # "High", "Medium", "Low"
+    message: str
+    # Set on a conflict with another product; None on a skin-type alert, which
+    # is about the product itself. Every pair that product clashes on is listed
+    # in details, most severe first. Both are additive: a caller that reads only
+    # the three fields above sees one warning per product, with a summary message.
+    conflicting_product: Optional[str] = None
+    details: List[ConflictDetail] = []
 
 class DuplicateMatch(BaseModel):
     product_id: str

@@ -2,7 +2,7 @@ import unicodedata
 from typing import Any, List, Dict, Optional
 
 from app.db.connection import supabase
-from app.schemas import AnalysisResponse, DuplicateMatch, WarningAlert
+from app.schemas import AnalysisResponse, ConflictDetail, DuplicateMatch, WarningAlert
 
 # Functional groups that describe filler, not what a product actually does.
 # Plain ingredient-overlap similarity is useless for dupe detection without
@@ -358,6 +358,96 @@ def _is_shadowed_by_specific_rule(
     return True
 
 
+def _join_names(names: List[str]) -> str:
+    """'A', 'A and B', 'A, B and C'."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _summarise_product_conflict(product: str, details: List[ConflictDetail]) -> str:
+    """One sentence naming every clashing pair, grouped by the checked product's
+    ingredient, e.g. "Conflict with Peptide Serum: 3 ingredient clashes.
+    Salicylic Acid with Multi-Peptide Complex, Acetyl Hexapeptide-8 and
+    Pentapeptide-18."
+
+    Counts distinct pairs rather than details: a category rule graded above the
+    curated rule for the same pair survives BE-DEF-13's suppression, and the
+    pair would otherwise be counted twice and listed once.
+    """
+    partners: Dict[str, List[str]] = {}
+    for detail in details:
+        others = partners.setdefault(detail.ingredient, [])
+        other = detail.conflicting_ingredient or "an unnamed ingredient"
+        if other not in others:
+            others.append(other)
+    count = sum(len(others) for others in partners.values())
+    noun = "ingredient clash" if count == 1 else "ingredient clashes"
+    pairs = "; ".join(f"{ing} with {_join_names(others)}" for ing, others in partners.items())
+    return f"Conflict with {product}: {count} {noun}. {pairs}."
+
+
+def group_warnings_by_product(warnings: List[WarningAlert]) -> List[WarningAlert]:
+    """Merge every conflict with the same product into one warning.
+
+    analyze() produces one warning per clashing ingredient pair, so a product
+    that clashes on several pairs was reported several times. A peptide serum
+    carrying three peptides, checked against a BHA exfoliant, showed three
+    near-identical cards each naming the same serum. The user has one decision
+    to make about that product, so it gets one warning, with every pair in
+    `details`, most severe first.
+
+    The merged warning takes its severity and alert_type from its most severe
+    pair, so it sorts and colours like its worst clash, and alert_type stays a
+    value existing clients already filter on. A product with only one pair keeps
+    its original warning unchanged.
+
+    Warnings with no conflicting_product - the skin-type alerts, which are about
+    the checked product itself - pass through untouched. A merged warning stands
+    where that product's first warning stood, so the order stays stable.
+
+    Applied by the shelf and compare endpoints, not inside analyze(): the
+    routine feature also calls analyze() and passes each pair to its own
+    validation step, and is left exactly as it was.
+    """
+    slots: List[Any] = []  # a WarningAlert passed through, or a product name to fill
+    by_product: Dict[str, List[WarningAlert]] = {}
+    for warning in warnings:
+        product = warning.conflicting_product
+        if product is None:
+            slots.append(warning)
+            continue
+        if product not in by_product:
+            by_product[product] = []
+            slots.append(product)
+        by_product[product].append(warning)
+
+    grouped: List[WarningAlert] = []
+    for slot in slots:
+        if isinstance(slot, WarningAlert):
+            grouped.append(slot)
+            continue
+        group = by_product[slot]
+        if len(group) == 1:
+            grouped.append(group[0])
+            continue
+        # Stable, so pairs of equal severity keep the order analyze() found them in.
+        details = sorted(
+            (detail for warning in group for detail in warning.details),
+            key=lambda detail: _severity_rank(detail.severity),
+            reverse=True,
+        )
+        worst = details[0]
+        grouped.append(WarningAlert(
+            alert_type=worst.alert_type,
+            severity=worst.severity,
+            message=_summarise_product_conflict(slot, details),
+            conflicting_product=slot,
+            details=details,
+        ))
+    return grouped
+
+
 # --- Core analysis -----------------------------------------------------------
 
 def analyze(product_id: str, user_id: Optional[str], comparison_products: List[dict]) -> AnalysisResponse:
@@ -473,10 +563,28 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
             # Every product carrying the clashing ingredient, not just one of
             # them. BE-DEF-12.
             for clashing_product in comparison_ingredient_ids[comparison_id]:
+                # The frontend relies on this sentence's shape. It strips the
+                # "Conflict with <product>: " prefix when the card already names
+                # the product, and folds a product's pairs into one line when
+                # their messages match once conflicting_ingredient is blanked
+                # out. This sentence does not name the other product's
+                # ingredient, so two pairs fold only when they share the target
+                # ingredient and the rule text. PASS 2's sentence does name it,
+                # so its pairs fold per rule. Rewording either sentence per pair
+                # stops the folding; the lines still render, one each.
+                message = f"Conflict with {clashing_product}: Layering {target_ing_name} directly alongside it triggers a structural clash. {rule['warning_message']}"
                 warnings.append(WarningAlert(
                     alert_type="Chemical Interaction Warning",
                     severity=severity,
-                    message=f"Conflict with {clashing_product}: Layering {target_ing_name} directly alongside it triggers a structural clash. {rule['warning_message']}",
+                    message=message,
+                    conflicting_product=clashing_product,
+                    details=[ConflictDetail(
+                        alert_type="Chemical Interaction Warning",
+                        severity=severity,
+                        ingredient=target_ing_name,
+                        conflicting_ingredient=comp_ing_name,
+                        message=message,
+                    )],
                 ))
                 if comp_ing_name:
                     key = (target_ing_name, clashing_product, comp_ing_name)
@@ -505,10 +613,21 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                     rule["severity"], covered_by_specific_rule,
                 ):
                     continue
+                severity = rule["severity"].title()
+                # Shape relied on by the frontend's folding; see PASS 1's note.
+                message = f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}"
                 warnings.append(WarningAlert(
                     alert_type="Active Routine Clash",
-                    severity=rule["severity"].title(),
-                    message=f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}",
+                    severity=severity,
+                    message=message,
+                    conflicting_product=prod_name,
+                    details=[ConflictDetail(
+                        alert_type="Active Routine Clash",
+                        severity=severity,
+                        ingredient=target_ing_names,
+                        conflicting_ingredient=comp_ing_name,
+                        message=message,
+                    )],
                 ))
 
     warnings = _dedupe_warnings(warnings)

@@ -499,6 +499,35 @@ def test_compare_reports_a_skin_type_conflict_carried_by_product_b_alone(
     assert "Denatured Alcohol" in conflicts[0]["message"]
 
 
+PEPTIDES = [{"id": f"ing-pep-{n}", "name": name, "functional_group": "Peptide"}
+            for n, name in enumerate(["Multi-Peptide Complex", "Acetyl Hexapeptide-8",
+                                      "Pentapeptide-18"])]
+BHA_VS_PEPTIDE_RULE = {
+    "group_a": "Beta Hydroxy Acid (BHA)", "group_b": "Peptide",
+    "severity": "medium", "warning_message": "Low-pH BHA exfoliants can break down peptides.",
+}
+
+
+def test_compare_reports_every_clash_with_product_b_as_one_conflict(client, patch_supabase):
+    """Returns a single conflict naming product B, with all three of its
+    clashing pairs in details, when product A's acid clashes with three of
+    product B's peptides."""
+    store = _compare_store([], [BHA_VS_PEPTIDE_RULE])
+    store["products"] = [
+        product(PROD_A_ID, "Paula's Choice", "2% BHA Liquid Exfoliant", "Exfoliant", [SALICYLIC]),
+        product(PROD_B_ID, "Brand B", "Peptide Serum", "Serum", PEPTIDES),
+    ]
+    patch_supabase(store, "app.api.products", "app.core.services.compatibility_service")
+
+    conflicts = client.get("/products/compare",
+                           params={"product_a_id": PROD_A_ID,
+                                   "product_b_id": PROD_B_ID}).json()["conflicts"]
+
+    [conflict] = conflicts
+    assert conflict["conflicting_product"] == "Peptide Serum"
+    assert len(conflict["details"]) == 3
+
+
 def test_compare_reports_an_internal_failure_as_a_400(client, patch_supabase, monkeypatch):
     """Returns HTTP 400 with the detail "Failed to compare products." when the
     handler raises something other than an HTTPException.

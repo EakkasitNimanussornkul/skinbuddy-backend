@@ -138,6 +138,12 @@ def alert_types(response):
     return {w["alert_type"] for w in response.json()["warnings"]}
 
 
+def detail_types(response):
+    """The rule types behind every warning, including pairs merged into one
+    product's warning."""
+    return {d["alert_type"] for w in response.json()["warnings"] for d in w["details"]}
+
+
 def test_analyze_surfaces_a_conflict_with_an_active_shelf_product(client, patch_supabase, as_user):
     """Returns is_safe=False and an Active Routine Clash warning when the target
     Retinoid conflicts with a BHA product active on the caller's shelf.
@@ -415,9 +421,11 @@ def test_analyze_states_one_clash_once_when_both_rule_tables_describe_it(
 
 def test_analyze_keeps_a_category_rule_graded_above_the_curated_one(
         client, patch_supabase, as_user):
-    """Returns both warnings when the category rule is more severe than the
-    ingredient-pair rule covering the same clash, so suppressing the general
-    rule can never quietly downgrade the verdict the user is shown."""
+    """Returns both clashes, the ingredient pair and the category, when the
+    category rule is more severe than the ingredient-pair rule covering the same
+    clash, so suppressing the general rule can never quietly downgrade the
+    verdict the user is shown. Both are with the same product, so they arrive
+    as one warning graded High, the more severe of the two."""
     as_user("user-1")
     patch_supabase(
         rule_store([shelf_row("item-1", "user-1", "active", BHA_PRODUCT)],
@@ -427,14 +435,18 @@ def test_analyze_keeps_a_category_rule_graded_above_the_curated_one(
 
     resp = client.get("/shelf/analyze/prod-retinol")
     assert resp.status_code == 200
-    assert alert_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+    assert detail_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+    [warning] = resp.json()["warnings"]
+    assert warning["severity"] == "High"
 
 
 def test_analyze_keeps_a_category_rule_covering_an_ingredient_no_curated_rule_reaches(
         client, patch_supabase, as_user):
-    """Returns both warnings when the target carries two ingredients in the
-    conflicting group and only one of them has a curated rule, because the
-    category warning is the only thing that mentions the other.
+    """Returns both clashes, the ingredient pair and the category, when the
+    target carries two ingredients in the conflicting group and only one of them
+    has a curated rule, because the category clash is the only thing that
+    mentions the other. Both are with the same product, so they arrive as one
+    warning listing both.
 
     Suppression is per ingredient pair, not per group: a group is only silenced
     when every ingredient in it has already been reported."""
@@ -456,7 +468,8 @@ def test_analyze_keeps_a_category_rule_covering_an_ingredient_no_curated_rule_re
 
     resp = client.get("/shelf/analyze/prod-retinol")
     assert resp.status_code == 200
-    assert alert_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+    assert detail_types(resp) == {"Chemical Interaction Warning", "Active Routine Clash"}
+    assert len(resp.json()["warnings"]) == 1
 
 
 def test_analyze_keeps_a_category_rule_no_curated_rule_covers(
@@ -474,6 +487,130 @@ def test_analyze_keeps_a_category_rule_no_curated_rule_covers(
     resp = client.get("/shelf/analyze/prod-retinol")
     assert resp.status_code == 200
     assert "Active Routine Clash" in alert_types(resp)
+
+
+# --- One warning per clashing product ----------------------------------------
+#
+# analyze() reports each clashing ingredient pair on its own. A shelf serum
+# carrying three peptides, checked against a BHA exfoliant, therefore came back
+# as three cards naming the same serum. The endpoint now merges them into one
+# warning for that product, with each pair listed in `details`.
+
+BHA_TARGET = {
+    "id": "prod-bha",
+    "name": "2% BHA Liquid Exfoliant",
+    "product_ingredients": [
+        {"ingredients": {"id": "ing-sa", "name": "Salicylic Acid",
+                         "functional_group": "Beta Hydroxy Acid (BHA)",
+                         "bad_for": "Extremely Dry Skin (D)"}}
+    ],
+}
+
+PEPTIDE_SERUM = {
+    "name": "Multi-Technology Peptide Serum",
+    "product_ingredients": [
+        {"ingredients": {"id": f"ing-pep-{n}", "name": name, "functional_group": "Peptide"}}
+        for n, name in enumerate(["Multi-Peptide Complex", "Acetyl Hexapeptide-8",
+                                  "Pentapeptide-18"])
+    ],
+}
+RETINOID_SHELF_SERUM = joined_product("Retinol 0.2% in Squalane", "ing-retinol",
+                                      "Retinol", "Retinoid")
+
+BHA_VS_PEPTIDE_RULE = {
+    "group_a": "Beta Hydroxy Acid (BHA)",
+    "group_b": "Peptide",
+    "severity": "medium",
+    "warning_message": "Low-pH BHA exfoliants can break down peptides.",
+}
+
+
+def grouping_store(shelf_products, category_rules, skin_type="ORNT"):
+    return {
+        "shelf_items": [shelf_row(f"item-{n}", "user-1", "active", p)
+                        for n, p in enumerate(shelf_products)],
+        "products": [BHA_TARGET],
+        "users": [{"id": "user-1", "skin_type": skin_type}],
+        "conflict_rules": [],
+        "category_conflict_rules": category_rules,
+    }
+
+
+def test_analyze_merges_every_clash_with_one_product_into_one_warning(
+        client, patch_supabase, as_user):
+    """Returns one warning for a shelf product that clashes on three ingredient
+    pairs, naming that product once and listing all three pairs in details,
+    rather than three separate warnings naming the same product."""
+    as_user("user-1")
+    patch_supabase(grouping_store([PEPTIDE_SERUM], [BHA_VS_PEPTIDE_RULE]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    resp = client.get("/shelf/analyze/prod-bha")
+    assert resp.status_code == 200
+
+    [warning] = resp.json()["warnings"]
+    assert warning["conflicting_product"] == "Multi-Technology Peptide Serum"
+    assert warning["alert_type"] == "Active Routine Clash"
+    assert warning["severity"] == "Medium"
+    assert [d["conflicting_ingredient"] for d in warning["details"]] == [
+        "Multi-Peptide Complex", "Acetyl Hexapeptide-8", "Pentapeptide-18"]
+    assert warning["message"] == (
+        "Conflict with Multi-Technology Peptide Serum: 3 ingredient clashes. "
+        "Salicylic Acid with Multi-Peptide Complex, Acetyl Hexapeptide-8 and "
+        "Pentapeptide-18."
+    )
+    assert resp.json()["is_safe"] is False
+
+
+def test_analyze_states_one_category_rule_in_the_same_words_for_every_pair(
+        client, patch_supabase, as_user):
+    """Returns, for each pair a category rule produces against one product, a
+    detail message that names that pair's conflicting ingredient and is
+    otherwise word for word the same as its siblings', including the rule's
+    explanation.
+
+    The frontend folds such pairs into one line by blanking out
+    conflicting_ingredient and comparing what is left, so this sentence shape is
+    a contract with the card, not just wording."""
+    as_user("user-1")
+    patch_supabase(grouping_store([PEPTIDE_SERUM], [BHA_VS_PEPTIDE_RULE]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    [warning] = client.get("/shelf/analyze/prod-bha").json()["warnings"]
+
+    blanked = set()
+    for detail in warning["details"]:
+        assert detail["conflicting_ingredient"] in detail["message"]
+        blanked.add(detail["message"].replace(detail["conflicting_ingredient"], "_"))
+    assert blanked == {
+        "Category Conflict with Multi-Technology Peptide Serum: Combining Salicylic "
+        "Acid with _ is unadvised. Low-pH BHA exfoliants can break down peptides."
+    }
+
+
+def test_analyze_keeps_a_separate_warning_for_each_clashing_product(
+        client, patch_supabase, as_user):
+    """Returns one warning per clashing shelf product, plus the skin-type alert
+    on its own: the three peptide clashes merge into the serum's warning, the
+    retinol clash stays the retinol serum's, and a skin-type alert, which names
+    no other product, is never merged into either."""
+    as_user("user-1")
+    patch_supabase(
+        grouping_store([PEPTIDE_SERUM, RETINOID_SHELF_SERUM],
+                       [BHA_VS_PEPTIDE_RULE, RETINOID_VS_BHA_RULE], skin_type="DSPT"),
+        "app.core.services.compatibility_service", "app.api.shelf",
+    )
+
+    warnings = client.get("/shelf/analyze/prod-bha").json()["warnings"]
+
+    by_product = {w["conflicting_product"]: len(w["details"]) for w in warnings}
+    assert by_product == {
+        None: 0,                                  # the skin-type alert
+        "Multi-Technology Peptide Serum": 3,
+        "Retinol 0.2% in Squalane": 1,
+    }
+    [skin] = [w for w in warnings if w["conflicting_product"] is None]
+    assert skin["alert_type"] == "Skin Type Conflict"
 
 
 def test_analyze_does_not_report_a_product_that_could_not_be_assessed_as_safe(
