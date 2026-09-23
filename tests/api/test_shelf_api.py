@@ -496,15 +496,9 @@ def test_analyze_keeps_a_category_rule_no_curated_rule_covers(
 # as three cards naming the same serum. The endpoint now merges them into one
 # warning for that product, with each pair listed in `details`.
 
-BHA_TARGET = {
-    "id": "prod-bha",
-    "name": "2% BHA Liquid Exfoliant",
-    "product_ingredients": [
-        {"ingredients": {"id": "ing-sa", "name": "Salicylic Acid",
-                         "functional_group": "Beta Hydroxy Acid (BHA)",
-                         "bad_for": "Extremely Dry Skin (D)"}}
-    ],
-}
+# The checked product is BHA_TARGET, defined with the skin-type tests above.
+# It is not redefined here: a second module-level BHA_TARGET silently replaced
+# the first for every test in the file, including the skin-type ones.
 
 PEPTIDE_SERUM = {
     "name": "Multi-Technology Peptide Serum",
