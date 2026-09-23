@@ -562,6 +562,32 @@ def test_analyze_merges_every_clash_with_one_product_into_one_warning(
     assert resp.json()["is_safe"] is False
 
 
+def test_analyze_states_one_category_rule_in_the_same_words_for_every_pair(
+        client, patch_supabase, as_user):
+    """Returns, for each pair a category rule produces against one product, a
+    detail message that names that pair's conflicting ingredient and is
+    otherwise word for word the same as its siblings', including the rule's
+    explanation.
+
+    The frontend folds such pairs into one line by blanking out
+    conflicting_ingredient and comparing what is left, so this sentence shape is
+    a contract with the card, not just wording."""
+    as_user("user-1")
+    patch_supabase(grouping_store([PEPTIDE_SERUM], [BHA_VS_PEPTIDE_RULE]),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    [warning] = client.get("/shelf/analyze/prod-bha").json()["warnings"]
+
+    blanked = set()
+    for detail in warning["details"]:
+        assert detail["conflicting_ingredient"] in detail["message"]
+        blanked.add(detail["message"].replace(detail["conflicting_ingredient"], "_"))
+    assert blanked == {
+        "Category Conflict with Multi-Technology Peptide Serum: Combining Salicylic "
+        "Acid with _ is unadvised. Low-pH BHA exfoliants can break down peptides."
+    }
+
+
 def test_analyze_keeps_a_separate_warning_for_each_clashing_product(
         client, patch_supabase, as_user):
     """Returns one warning per clashing shelf product, plus the skin-type alert

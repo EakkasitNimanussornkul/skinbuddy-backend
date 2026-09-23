@@ -563,6 +563,15 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
             # Every product carrying the clashing ingredient, not just one of
             # them. BE-DEF-12.
             for clashing_product in comparison_ingredient_ids[comparison_id]:
+                # The frontend relies on this sentence's shape. It strips the
+                # "Conflict with <product>: " prefix when the card already names
+                # the product, and folds a product's pairs into one line when
+                # their messages match once conflicting_ingredient is blanked
+                # out. This sentence does not name the other product's
+                # ingredient, so two pairs fold only when they share the target
+                # ingredient and the rule text. PASS 2's sentence does name it,
+                # so its pairs fold per rule. Rewording either sentence per pair
+                # stops the folding; the lines still render, one each.
                 message = f"Conflict with {clashing_product}: Layering {target_ing_name} directly alongside it triggers a structural clash. {rule['warning_message']}"
                 warnings.append(WarningAlert(
                     alert_type="Chemical Interaction Warning",
@@ -605,6 +614,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                 ):
                     continue
                 severity = rule["severity"].title()
+                # Shape relied on by the frontend's folding; see PASS 1's note.
                 message = f"Category Conflict with {prod_name}: Combining {target_ing_names} with {comp_ing_name} is unadvised. {rule['warning_message']}"
                 warnings.append(WarningAlert(
                     alert_type="Active Routine Clash",
