@@ -342,6 +342,98 @@ def test_analyze_surfaces_a_skin_type_and_an_ingredient_pair_conflict_together(
     assert alert_types(resp) == {"Skin Type Conflict", "Chemical Interaction Warning"}
 
 
+# --- Why a skin-type conflict was raised --------------------------------------
+#
+# The alert's message names the ingredient and the Baumann code but not the
+# reason. The explanation comes from ingredient_concerns, matched on the same
+# "(<letter>)" marker bad_for uses, and grades the alert.
+
+def concern(title, target_profile, severity, description="Why it matters."):
+    return {"concern_title": title, "concern_description": description,
+            "target_profile": target_profile, "severity": severity}
+
+
+def explained_store(ingredient, skin_type="DSPT"):
+    return {
+        "shelf_items": [],
+        "products": [{"id": "prod-x", "name": "Test Serum", "category": "Serum",
+                      "product_ingredients": [{"ingredients": ingredient}]}],
+        "users": [{"id": "user-1", "skin_type": skin_type}],
+        "conflict_rules": [],
+        "category_conflict_rules": [],
+    }
+
+
+def test_analyze_explains_a_skin_type_conflict_from_its_concern(
+        client, patch_supabase, as_user):
+    """Returns the Skin Type Conflict graded Medium, the concern's Moderate on
+    the warnings' scale, with the matched trait, the concern's title and its
+    description in reasons, and the message unchanged."""
+    as_user("user-1")
+    salicylic = {**SALICYLIC_BAD_FOR_DRY, "ingredient_concerns": [
+        concern("Barrier Dehydration Risk", "Extremely Dry Skin (D)", "Moderate",
+                "BHA dissolves surface oils an already-dry barrier needs."),
+    ]}
+    patch_supabase(explained_store(salicylic),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    [warning] = client.get("/shelf/analyze/prod-x").json()["warnings"]
+
+    assert warning["severity"] == "Medium"
+    assert warning["reasons"] == [{
+        "trait": "Extremely Dry Skin (D)",
+        "title": "Barrier Dehydration Risk",
+        "description": "BHA dissolves surface oils an already-dry barrier needs.",
+        "severity": "Medium",
+    }]
+    assert warning["message"] == (
+        "Personalized Alert: Salicylic Acid is known to trigger adverse "
+        "reactions for Baumann Type DSPT."
+    )
+
+
+def test_analyze_grades_a_skin_type_conflict_by_its_worst_trait(
+        client, patch_supabase, as_user):
+    """Returns one Skin Type Conflict graded High when an ingredient is flagged
+    for two traits of the caller's code, a Moderate one and a High one, with a
+    reason for each in the order of the Baumann code."""
+    as_user("user-1")
+    alcohol = {
+        "id": "ing-alc", "name": "Alcohol Denat.", "functional_group": "Solvent",
+        "bad_for": "Extremely Dry Skin (D), Highly Sensitive Skin (S)",
+        "ingredient_concerns": [
+            concern("Alcohol Sting", "Highly Sensitive Skin (S)", "High"),
+            concern("Barrier Dehydration Risk", "Extremely Dry Skin (D)", "Moderate"),
+        ],
+    }
+    patch_supabase(explained_store(alcohol),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    [warning] = client.get("/shelf/analyze/prod-x").json()["warnings"]
+
+    assert warning["severity"] == "High"
+    assert [(r["trait"], r["severity"]) for r in warning["reasons"]] == [
+        ("Extremely Dry Skin (D)", "Medium"),
+        ("Highly Sensitive Skin (S)", "High"),
+    ]
+
+
+def test_analyze_names_the_trait_when_no_concern_explains_it(
+        client, patch_supabase, as_user):
+    """Returns the Skin Type Conflict graded High, as before concerns were read,
+    with a reason naming the matched trait and no title or description, when no
+    concern covers that trait."""
+    as_user("user-1")
+    patch_supabase(explained_store(SALICYLIC_BAD_FOR_DRY),
+                   "app.core.services.compatibility_service", "app.api.shelf")
+
+    [warning] = client.get("/shelf/analyze/prod-x").json()["warnings"]
+
+    assert warning["severity"] == "High"
+    assert warning["reasons"] == [{"trait": "Extremely Dry Skin (D)", "title": None,
+                                   "description": None, "severity": "High"}]
+
+
 # --- Each real conflict, stated exactly once (BE-DEF-12, BE-DEF-13) ----------
 
 SECOND_BHA_PRODUCT = joined_product("Exfoliating Toner", "ing-sa", "Salicylic Acid",

@@ -2,7 +2,7 @@ import unicodedata
 from typing import Any, List, Dict, Optional
 
 from app.db.connection import supabase
-from app.schemas import AnalysisResponse, ConflictDetail, DuplicateMatch, WarningAlert
+from app.schemas import AnalysisResponse, ConflictDetail, DuplicateMatch, SkinTypeReason, WarningAlert
 
 # Functional groups that describe filler, not what a product actually does.
 # Plain ingredient-overlap similarity is useless for dupe detection without
@@ -358,6 +358,67 @@ def _is_shadowed_by_specific_rule(
     return True
 
 
+# ingredient_concerns grades High / Moderate / Low. Warnings use High / Medium /
+# Low: the rule tables' scale, and the only three the frontend bands - it prints
+# no severity chip for "Moderate".
+_CONCERN_TO_WARNING_SEVERITY = {"high": "High", "moderate": "Medium", "medium": "Medium", "low": "Low"}
+
+# A skin-type match with no concern written for it keeps the grade every
+# skin-type alert carried before concerns were read: the conservative one.
+_UNEXPLAINED_SKIN_TYPE_SEVERITY = "High"
+
+
+def _warning_severity(concern_severity: Optional[str]) -> str:
+    """A concern's severity on the warnings' scale. An unrecognised grade is
+    title-cased, as rule severities are; a missing one is treated as no grade."""
+    raw = (concern_severity or "").strip()
+    if not raw:
+        return _UNEXPLAINED_SKIN_TYPE_SEVERITY
+    return _CONCERN_TO_WARNING_SEVERITY.get(raw.lower(), raw.title())
+
+
+def _skin_type_reasons(ingredient: Dict[str, Any], user_skin_type: str) -> List[SkinTypeReason]:
+    """Why an ingredient is a poor fit for this Baumann code, one entry per
+    trait of the code its bad_for flags. Empty when nothing matches.
+
+    A trait matches the way it always has: its "(<letter>)" marker appears in
+    bad_for. The explanation comes from ingredient_concerns, the table the
+    product page already shows, matched on the same marker in target_profile.
+    Where several concerns carry the marker, the most severe is used, since it
+    sets the grade.
+
+    Each trait is named even when no concern covers it: "Extremely Dry Skin
+    (D)" already tells the user which part of their type is the problem, which
+    the alert's message never did.
+    """
+    bad_for = ingredient.get("bad_for") or ""
+    concerns = ingredient.get("ingredient_concerns") or []
+    reasons: List[SkinTypeReason] = []
+    for letter in user_skin_type:
+        marker = f"({letter})"
+        if marker not in bad_for:
+            continue
+        # The bad_for entry holding the marker, not the whole list: "Active
+        # Acne, Highly Sensitive Skin (S)" is flagged for (S) by its second part.
+        trait = next((part.strip() for part in bad_for.split(",") if marker in part), marker)
+        matching = [c for c in concerns if marker in (c.get("target_profile") or "")]
+        concern = max(
+            matching,
+            key=lambda c: _severity_rank(_warning_severity(c.get("severity"))),
+            default=None,
+        )
+        if concern is None:
+            reasons.append(SkinTypeReason(trait=trait, severity=_UNEXPLAINED_SKIN_TYPE_SEVERITY))
+        else:
+            reasons.append(SkinTypeReason(
+                trait=trait,
+                title=concern.get("concern_title"),
+                description=concern.get("concern_description"),
+                severity=_warning_severity(concern.get("severity")),
+            ))
+    return reasons
+
+
 def _join_names(names: List[str]) -> str:
     """'A', 'A and B', 'A, B and C'."""
     if len(names) <= 1:
@@ -474,7 +535,9 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
     # 2. Target product metadata
     target_res = (
         supabase.table("products")
-        .select("*, product_ingredients(ingredients(*))")
+        # ingredient_concerns explains the skin-type pass below; nothing else
+        # here reads it.
+        .select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
         .eq("id", product_id)
         .limit(1)
         .execute()
@@ -500,12 +563,19 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
         for item in target_data["product_ingredients"]:
             ing = item.get("ingredients")
             if ing:
-                bad_for_str = ing.get("bad_for")
-                if bad_for_str and any(f"({letter})" in bad_for_str for letter in user_skin_type):
+                reasons = _skin_type_reasons(ing, user_skin_type)
+                if reasons:
+                    # Graded by its explanation rather than always "High": the
+                    # most severe concern among the traits that matched.
+                    worst = max(reasons, key=lambda r: _severity_rank(r.severity))
                     warnings.append(WarningAlert(
                         alert_type="Skin Type Conflict",
-                        severity="High",
+                        severity=worst.severity,
+                        # Unchanged, so every existing reader of the sentence
+                        # (the routine feature among them) sees the same text;
+                        # the explanation travels in `reasons`.
                         message=f"Personalized Alert: {ing['name']} is known to trigger adverse reactions for Baumann Type {user_skin_type}.",
+                        reasons=reasons,
                     ))
 
     # Whether the target could be assessed at all, which is not the same thing
