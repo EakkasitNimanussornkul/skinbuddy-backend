@@ -158,6 +158,14 @@ class ConflictDetail(BaseModel):
     message: str
 
 
+class SkinTypeReason(BaseModel):
+    """Why one ingredient suits the caller's skin type poorly, for one trait."""
+    trait: str                          # the bad_for entry that matched, e.g. "Extremely Dry Skin (D)"
+    title: Optional[str] = None         # from ingredient_concerns, when one covers this trait
+    description: Optional[str] = None
+    severity: str                       # the concern's, on the High/Medium/Low scale; "High" when none
+
+
 class WarningAlert(BaseModel):
     alert_type: str  # "Skin Type Conflict", "Chemical Interaction Warning", "Active Routine Clash"
     severity: str    # "High", "Medium", "Low"
@@ -168,6 +176,11 @@ class WarningAlert(BaseModel):
     # the three fields above sees one warning per product, with a summary message.
     conflicting_product: Optional[str] = None
     details: List[ConflictDetail] = []
+    # Set on a Skin Type Conflict only: one entry per trait of the caller's
+    # Baumann code the ingredient is flagged for, with the explanation from
+    # ingredient_concerns when one exists. The warning's severity is the most
+    # severe entry's.
+    reasons: List[SkinTypeReason] = []
 
 class DuplicateMatch(BaseModel):
     product_id: str
