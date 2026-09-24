@@ -99,7 +99,17 @@ class ProductCreate(BaseModel):
     image_url: Optional[str] = None 
     pao: Optional[int] = None
 
-class ProductDetail(ProductResponse): 
+class MatchBreakdown(BaseModel):
+    """The working behind skin_match_score, so the page can show how it was made."""
+    helpful: int              # ingredients that suit a trait of the user's code
+    concerns: int             # ingredients flagged for a trait of the code
+    concern_weight: float     # those concerns summed by grade: High 1.0, Medium 0.6, Low 0.3
+    considered: int           # ingredients that said anything about the code (helpful, concern, or both)
+    total_ingredients: int    # every ingredient in the product
+    limited: bool             # fewer than 3 considered: the score rests on too little to lean on
+
+
+class ProductDetail(ProductResponse):
     description: Optional[str] = None
     price_thb: Optional[float] = None
     price_usd: Optional[float] = None
@@ -108,6 +118,8 @@ class ProductDetail(ProductResponse):
     
     safety_flags: Optional[SafetyFlags] = None
     skin_match_score: Optional[float] = None
+    # None exactly when skin_match_score is None for want of a skin type.
+    match_breakdown: Optional[MatchBreakdown] = None
     match_reasons: Optional[List[str]] = []
     caution_reasons: Optional[List[str]] = []
 

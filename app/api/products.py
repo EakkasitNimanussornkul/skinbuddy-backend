@@ -24,10 +24,12 @@ def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
     if user_skin_type:
         match_info = compute_baumann_compatibility(user_skin_type, ings)
         score, match_reasons, caution_reasons = match_info["score"], match_info["match_reasons"], match_info["caution_reasons"]
+        breakdown = match_info["breakdown"]
     else:
-        score, match_reasons, caution_reasons = None, [], []
+        score, match_reasons, caution_reasons, breakdown = None, [], [], None
     return {
         "skin_match_score": score,
+        "match_breakdown": breakdown,
         "match_reasons": match_reasons,
         "caution_reasons": caution_reasons,
         "safety_flags": calculate_safety_flags(prod.get("product_ingredients", [])),
@@ -88,8 +90,10 @@ TRAIT_NAMES = {"D": "dry", "O": "oily", "S": "sensitive", "P": "pigmentation-pro
 # grade. An unrecognised grade counts as High.
 CONCERN_WEIGHT = {"High": 1.0, "Medium": 0.6, "Low": 0.3}
 
-# Neutral points added to each side of the ratio (see compute_baumann_compatibility).
-SCORE_SMOOTHING = 1.0
+# Fewer ingredients than this saying anything about the code, and the score is
+# marked limited: a 100% or 0% resting on one ingredient reads the same as one
+# resting on twenty-four, and the page needs to be able to say which it is.
+LIMITED_EVIDENCE_BELOW = 3
 
 
 def _suited_traits(ingredient: Dict[str, Any], user_skin_type: str) -> List[str]:
@@ -130,7 +134,7 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
         # ingredients, and an explanation for a verdict the UI is not showing
         # is worse than none. Every consumer already handles None - it is the
         # anonymous-caller shape this endpoint serves today.
-        return {"score": None, "match_reasons": [], "caution_reasons": []}
+        return {"score": None, "breakdown": None, "match_reasons": [], "caution_reasons": []}
 
     # Each ingredient is read for the traits of this code it suits (good_for)
     # and the ones it is flagged for (bad_for, explained and graded by
@@ -140,7 +144,9 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
     helpful: Dict[str, List[str]] = {}          # trait letter -> ingredient names, in code order
     cautions: List[tuple] = []                  # (weight, sentence)
     helpful_count = 0
+    concern_count = 0
     concern_weight = 0.0
+    considered = 0
     for ing in ingredients:
         name = ing.get("name") or "An ingredient"
         suited = _suited_traits(ing, user_skin_type)
@@ -152,21 +158,36 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
         if reasons:
             worst = max(reasons, key=lambda r: compatibility_service._severity_rank(r.severity))
             weight = CONCERN_WEIGHT.get(worst.severity, CONCERN_WEIGHT["High"])
+            concern_count += 1
             concern_weight += weight
             label = worst.title or f"flagged for {worst.trait}"
             cautions.append((weight, f"{name}: {label} ({worst.severity})"))
+        if suited or reasons:
+            considered += 1
+
+    # The working, returned beside the score so the page can show it: "Based
+    # on 9 of 23 ingredients: 7 suit your skin, 2 are a concern for it".
+    breakdown = {
+        "helpful": helpful_count,
+        "concerns": concern_count,
+        "concern_weight": round(concern_weight, 2),
+        "considered": considered,
+        "total_ingredients": len(ingredients),
+        "limited": considered < LIMITED_EVIDENCE_BELOW,
+    }
 
     # Nothing in the formula says anything about this skin type either way.
     # A number here would be a guess; None is what every consumer already
-    # shows as "not scored".
-    if helpful_count == 0 and concern_weight == 0:
-        return {"score": None, "match_reasons": [], "caution_reasons": []}
+    # shows as "not scored". The breakdown still says why: 0 considered.
+    if considered == 0:
+        return {"score": None, "breakdown": breakdown, "match_reasons": [], "caution_reasons": []}
 
-    # Helpful ingredients against weighted concerns, each side padded by one
-    # neutral point so a single ingredient cannot pin a product to 0% or 100%:
-    # one Low concern alone gives 43, one helpful ingredient alone gives 67,
-    # and only a formula with many of either reaches the ends of the scale.
-    score = 100 * (helpful_count + SCORE_SMOOTHING) / (helpful_count + concern_weight + 2 * SCORE_SMOOTHING)
+    # The plain share: helpful ingredients against weighted concerns. Not
+    # smoothed - the owner chose a number whose making is visible over one
+    # nudged away from 0% and 100%. So 100% means every ingredient that said
+    # anything about this code was on the helpful side, however few there
+    # were; `limited` in the breakdown is how a reader tells the difference.
+    score = 100 * helpful_count / (helpful_count + concern_weight)
 
     # rstrip before the full stop: "Alcohol Denat." would otherwise end "Denat..".
     match_reasons = [
@@ -178,6 +199,7 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
 
     return {
         "score": round(score, 1),
+        "breakdown": breakdown,
         "match_reasons": match_reasons,
         "caution_reasons": caution_reasons,
     }
@@ -392,6 +414,8 @@ async def compare_two_products(
             match_b = compute_baumann_compatibility(user_skin_type, ings_b)
             prod_a["skin_match_score"] = match_a.get("score")
             prod_b["skin_match_score"] = match_b.get("score")
+            prod_a["match_breakdown"] = match_a.get("breakdown")
+            prod_b["match_breakdown"] = match_b.get("breakdown")
         else:
             prod_a["skin_match_score"] = None
             prod_b["skin_match_score"] = None

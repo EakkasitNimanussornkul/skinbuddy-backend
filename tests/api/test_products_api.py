@@ -61,9 +61,9 @@ def test_search_omits_personalisation_for_anonymous_callers(client, patch_supaba
 
 
 def test_search_computes_a_skin_match_score_when_authenticated(client, patch_supabase):
-    """Returns skin_match_score=66.7 and a match reason naming Glycerin for a
-    DSPT user: one ingredient suits dry skin and nothing is flagged,
-    (1 + 1) / (1 + 0 + 2)."""
+    """Returns skin_match_score=100.0, a match reason naming Glycerin, and the
+    working behind it for a DSPT user: the one ingredient that says anything
+    about the code suits dry skin, and nothing is flagged."""
     from app.main import app
     app.dependency_overrides[get_optional_user_id] = lambda: "user-1"
     patch_supabase(
@@ -72,8 +72,12 @@ def test_search_computes_a_skin_match_score_when_authenticated(client, patch_sup
     )
 
     result = client.get("/products/search").json()[0]
-    assert result["skin_match_score"] == 66.7
+    assert result["skin_match_score"] == 100.0
     assert result["match_reasons"] == ["Suits dry skin: Glycerin."]
+    assert result["match_breakdown"] == {
+        "helpful": 1, "concerns": 0, "concern_weight": 0.0,
+        "considered": 1, "total_ingredients": 2, "limited": True,
+    }
 
 
 def test_search_still_answers_when_the_callers_profile_row_is_missing(client, patch_supabase):
@@ -442,9 +446,9 @@ def scored_catalog(patch_supabase):
 
 
 def test_compare_scores_each_product_against_the_callers_skin_type(client, scored_catalog):
-    """Returns skin_match_score=66.7 for the product whose ingredient suits dry
-    skin and 33.3 for the one whose ingredient is flagged for it, for an
-    authenticated DSPT caller.
+    """Returns skin_match_score=100.0 for the product whose ingredient suits dry
+    skin and 0.0 for the one whose ingredient is flagged for it, each with its
+    own working, for an authenticated DSPT caller.
 
     Both are computed from the same profile but from each product's own
     ingredients, so the two scores must differ. Asserting only that they are
@@ -455,8 +459,12 @@ def test_compare_scores_each_product_against_the_callers_skin_type(client, score
     body = client.get("/products/compare",
                       params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID}).json()
 
-    assert body["product_a"]["skin_match_score"] == 66.7   # (1 + 1) / (1 + 0 + 2)
-    assert body["product_b"]["skin_match_score"] == 33.3   # (0 + 1) / (0 + 1.0 + 2), High: no concern row
+    assert body["product_a"]["skin_match_score"] == 100.0   # 1 / (1 + 0)
+    assert body["product_b"]["skin_match_score"] == 0.0     # 0 / (0 + 1.0), High: no concern row
+    # CompareResponse serialises through ProductDetail, which drops any field it
+    # does not declare - so this also proves the schema carries the working.
+    assert body["product_a"]["match_breakdown"]["helpful"] == 1
+    assert body["product_b"]["match_breakdown"]["concern_weight"] == 1.0
 
 
 # Shaped as the live catalogue shapes bad_for, e.g. "Extremely Dry Skin (D)";
@@ -708,7 +716,7 @@ def test_slug_omits_personalisation_for_an_anonymous_caller(client, patch_supaba
 
 
 def test_slug_scores_the_resolved_product_for_an_authenticated_caller(client, patch_supabase):
-    """Returns skin_match_score=66.7 and a match reason naming Glycerin for a
+    """Returns skin_match_score=100.0 and a match reason naming Glycerin for a
     DSPT caller, scored from the resolved product's own ingredients.
 
     The personalising branch of this route - the users lookup feeding
@@ -722,7 +730,8 @@ def test_slug_scores_the_resolved_product_for_an_authenticated_caller(client, pa
 
     body = client.get(f"/products/slug/{TARGET_SLUG}").json()
 
-    assert body["skin_match_score"] == 66.7   # Glycerin suits dry skin; Phenoxyethanol says nothing
+    assert body["skin_match_score"] == 100.0   # Glycerin suits dry skin; Phenoxyethanol says nothing
+    assert body["match_breakdown"]["considered"] == 1
     assert body["match_reasons"] == ["Suits dry skin: Glycerin."]
 
 

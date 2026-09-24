@@ -3,9 +3,10 @@
 The skin match score: how well a product's ingredients suit a Baumann code, as
 a percentage. Each ingredient counts as helpful when its good_for describes a
 trait of the code, and as a concern when its bad_for flags one, weighted by
-its ingredient_concerns grade (High 1.0, Medium 0.6, Low 0.3). The score is
-(helpful + 1) / (helpful + concerns + 2) x 100, rounded to one decimal place,
-and None when no ingredient says anything about the code.
+its ingredient_concerns grade (High 1.0, Medium 0.6, Low 0.3). The score is the
+plain share helpful / (helpful + weighted concerns) x 100, to one decimal
+place, and None when no ingredient says anything about the code. The working
+comes back beside it as a breakdown.
 
 Docstrings state the expected output, and are lifted verbatim into the
 "Expected Unit Output" field of the generated Test Record.
@@ -31,8 +32,17 @@ def score(code, *ingredients):
     return compute_baumann_compatibility(code, list(ingredients))["score"]
 
 
+def breakdown(code, *ingredients):
+    return compute_baumann_compatibility(code, list(ingredients))["breakdown"]
+
+
 GLYCERIN = ing("Glycerin", "Dry Skin, Dehydrated Skin")
 WATER = ing("Water", "All Skin Types")
+
+
+def flagged_for_dry(grade):
+    return ing("Salicylic Acid", None, "Extremely Dry Skin (D)",
+               concern("Extremely Dry Skin (D)", grade))
 
 
 # --- Guard clause ------------------------------------------------------------
@@ -44,10 +54,10 @@ WATER = ing("Water", "All Skin Types")
     "invalid_code", ["", None, "DS", "X", "dspt", "XXXX", "DSPTX", "1234"]
 )
 def test_invalid_skin_type_code_returns_no_score(invalid_code):
-    """Returns no score, and neither match nor caution reasons, when the
-    skin-type code is not one of the sixteen valid Baumann codes."""
+    """Returns no score, no breakdown, and neither match nor caution reasons,
+    when the skin-type code is not one of the sixteen valid Baumann codes."""
     result = compute_baumann_compatibility(invalid_code, [GLYCERIN])
-    assert result == {"score": None, "match_reasons": [], "caution_reasons": []}
+    assert result == {"score": None, "breakdown": None, "match_reasons": [], "caution_reasons": []}
 
 
 def test_valid_skin_type_code_is_still_scored():
@@ -60,10 +70,14 @@ def test_valid_skin_type_code_is_still_scored():
 # --- No evidence -------------------------------------------------------------
 
 def test_a_product_saying_nothing_about_the_code_is_not_scored():
-    """Returns no score, and no reasons, when no ingredient suits or is flagged
-    for any trait of the code, rather than a number that would only be a guess."""
+    """Returns no score and no reasons, but a breakdown of 0 considered out of
+    the product's ingredients, when no ingredient suits or is flagged for any
+    trait of the code, rather than a number that would only be a guess."""
     result = compute_baumann_compatibility("DSPT", [WATER, ing("Mystery Compound")])
-    assert result == {"score": None, "match_reasons": [], "caution_reasons": []}
+    assert result["score"] is None
+    assert (result["match_reasons"], result["caution_reasons"]) == ([], [])
+    assert result["breakdown"]["considered"] == 0
+    assert result["breakdown"]["total_ingredients"] == 2
 
 
 def test_good_for_a_trait_outside_the_code_does_not_count():
@@ -80,69 +94,92 @@ def test_all_skin_types_counts_for_no_one():
 
 # --- The formula -------------------------------------------------------------
 
-def test_one_helpful_ingredient_scores_two_thirds():
-    """Returns 66.7 for one ingredient that suits the code and nothing flagged:
-    (1 + 1) / (1 + 0 + 2)."""
-    assert score("DSPT", GLYCERIN) == 66.7
+def test_only_helpful_ingredients_score_100():
+    """Returns 100.0 when every ingredient that says anything about the code
+    suits it: the plain share, 1 / (1 + 0), not smoothed toward the middle."""
+    assert score("DSPT", GLYCERIN) == 100.0
 
 
-def test_more_helpful_ingredients_score_higher_but_never_100():
-    """Returns a higher score for more helpful ingredients, 91.7 for ten, and
-    never 100, so a formula cannot claim a perfect match from its tags alone."""
-    ten = [GLYCERIN] * 10
-    assert score("DSPT", *ten) == 91.7   # (10 + 1) / (10 + 0 + 2)
-    assert score("DSPT", *ten) > score("DSPT", GLYCERIN)
+def test_only_concerns_score_0():
+    """Returns 0.0 when every ingredient that says anything about the code is
+    flagged for it, whatever the grade."""
+    assert score("DSPT", flagged_for_dry("Low")) == 0.0
 
 
-@pytest.mark.parametrize("grade, expected", [("High", 33.3), ("Medium", 38.5), ("Low", 43.5)])
-def test_a_single_concern_is_weighed_by_its_grade(grade, expected):
-    """Returns 33.3, 38.5 or 43.5 for one flagged ingredient graded High,
-    Medium (the concerns table's Moderate) or Low, and nothing helpful:
-    1 / (weight + 2). A Low concern costs less than a High one, and none of them
-    reaches 0."""
-    table_grade = "Moderate" if grade == "Medium" else grade
-    flagged = ing("Salicylic Acid", None, "Extremely Dry Skin (D)",
-                  concern("Extremely Dry Skin (D)", table_grade))
-    assert score("DSPT", flagged) == expected
-
-
-def test_an_ingredient_flagged_for_two_traits_weighs_its_worst_grade():
-    """Returns 33.3, the High weight, for one ingredient flagged Moderate for dry
-    skin and High for sensitive skin, scored for DSPT: it counts once, at its
-    more serious grade, not at whichever trait comes first in the code."""
-    alcohol = ing("Alcohol Denat.", None, "Extremely Dry Skin (D), Highly Sensitive Skin (S)",
-                  concern("Extremely Dry Skin (D)", "Moderate"),
-                  concern("Highly Sensitive Skin (S)", "High"))
-    assert score("DSPT", alcohol) == 33.3
+@pytest.mark.parametrize("grade, expected", [("High", 50.0), ("Moderate", 62.5), ("Low", 76.9)])
+def test_a_concern_is_weighed_by_its_grade(grade, expected):
+    """Returns 50.0, 62.5 or 76.9 for one helpful ingredient against one
+    concern graded High, Moderate or Low: 1 / (1 + weight), weights 1.0, 0.6
+    and 0.3. A Low concern costs less than a High one."""
+    assert score("DSPT", GLYCERIN, flagged_for_dry(grade)) == expected
 
 
 def test_an_unrecognised_concern_grade_weighs_as_high():
-    """Returns 33.3, the High weight, for a flagged ingredient whose concern
-    carries a grade the scale does not know."""
-    flagged = ing("Salicylic Acid", None, "Extremely Dry Skin (D)",
-                  concern("Extremely Dry Skin (D)", "Critical"))
-    assert score("DSPT", flagged) == 33.3
+    """Returns 50.0, the High weight, for one helpful ingredient against a
+    concern whose grade the scale does not know."""
+    assert score("DSPT", GLYCERIN, flagged_for_dry("Critical")) == 50.0
+
+
+def test_an_ingredient_flagged_for_two_traits_weighs_its_worst_grade():
+    """Returns 50.0, the High weight, for one helpful ingredient against one
+    flagged Moderate for dry skin and High for sensitive skin, scored for DSPT:
+    it counts once, at its more serious grade, not at whichever trait comes
+    first in the code."""
+    alcohol = ing("Alcohol Denat.", None, "Extremely Dry Skin (D), Highly Sensitive Skin (S)",
+                  concern("Extremely Dry Skin (D)", "Moderate"),
+                  concern("Highly Sensitive Skin (S)", "High"))
+    assert score("DSPT", GLYCERIN, alcohol) == 50.0
 
 
 def test_an_ingredient_can_suit_one_trait_and_be_flagged_for_another():
-    """Returns 55.6 for niacinamide scored for OSPT: it suits oily skin and is
-    flagged Moderate for sensitive skin, so it counts on both sides:
-    (1 + 1) / (1 + 0.6 + 2)."""
+    """Returns 62.5 for niacinamide alone scored for OSPT: it suits oily skin
+    and is flagged Moderate for sensitive skin, so it counts on both sides:
+    1 / (1 + 0.6)."""
     niacinamide = ing("Niacinamide", "Oily Skin, Acne-Prone", "Highly Sensitive Skin (S)",
                       concern("Highly Sensitive Skin (S)", "Moderate"))
-    assert score("OSPT", niacinamide) == 55.6
+    assert score("OSPT", niacinamide) == 62.5
 
 
 def test_the_score_is_not_confined_to_steps_of_five():
-    """Returns a score that is not a multiple of 5, 58.8 for five helpful
-    ingredients against two High and two Medium concerns, since the old scorer
-    could only move in fixed steps."""
+    """Returns 61.0 for five helpful ingredients against two High and two
+    Moderate concerns, 5 / (5 + 3.2): a value the old scorer, which moved only
+    in fixed steps, could not produce."""
     flagged_high = ing("Retinol", None, "Sensitive Skin (S)", concern("Sensitive Skin (S)", "High"))
-    flagged_medium = ing("Niacinamide", None, "Highly Sensitive Skin (S)",
-                         concern("Highly Sensitive Skin (S)", "Moderate"))
-    result = score("DSPT", *[GLYCERIN] * 5, flagged_high, flagged_high, flagged_medium, flagged_medium)
-    assert result == 58.8   # (5 + 1) / (5 + 3.2 + 2) = 6 / 10.2
+    flagged_moderate = ing("Niacinamide", None, "Highly Sensitive Skin (S)",
+                           concern("Highly Sensitive Skin (S)", "Moderate"))
+    result = score("DSPT", *[GLYCERIN] * 5, flagged_high, flagged_high, flagged_moderate, flagged_moderate)
+    assert result == 61.0
     assert result % 5 != 0
+
+
+# --- The working ---------------------------------------------------------------
+
+def test_the_breakdown_carries_the_counts_behind_the_score():
+    """Returns the working beside the score: helpful and concern counts, the
+    summed concern weight, how many ingredients were considered, and the
+    product's total. An ingredient counted on both sides is considered once."""
+    niacinamide = ing("Niacinamide", "Oily Skin", "Highly Sensitive Skin (S)",
+                      concern("Highly Sensitive Skin (S)", "Moderate"))
+    retinol = ing("Retinol", None, "Sensitive Skin (S)", concern("Sensitive Skin (S)", "Low"))
+    assert breakdown("OSPT", niacinamide, retinol, WATER, ing("Silica", "Oily Skin")) == {
+        "helpful": 2, "concerns": 2, "concern_weight": 0.9,
+        "considered": 3, "total_ingredients": 4, "limited": False,
+    }
+
+
+@pytest.mark.parametrize("considered, limited", [(1, True), (2, True), (3, False)])
+def test_a_score_resting_on_fewer_than_three_ingredients_is_limited(considered, limited):
+    """Returns limited=True when fewer than three ingredients say anything about
+    the code, and False from three: a 100% resting on one ingredient must be
+    distinguishable from one resting on many."""
+    result = breakdown("DSPT", *[GLYCERIN] * considered, WATER)
+    assert (result["considered"], result["limited"]) == (considered, limited)
+
+
+def test_the_concern_weight_is_rounded_to_two_places():
+    """Returns concern_weight 0.9 for three Low concerns, not the floating-point
+    sum 0.8999999999999999."""
+    assert breakdown("DSPT", *[flagged_for_dry("Low")] * 3)["concern_weight"] == 0.9
 
 
 # --- The vocabulary ----------------------------------------------------------
@@ -163,12 +200,12 @@ def test_every_good_for_phrase_the_dictionary_writes_is_accounted_for():
 
 
 def test_salicylic_acid_counts_for_oily_skin_through_its_dictionary_tag():
-    """Returns 66.7 for salicylic acid, tagged by the dictionary as good for
+    """Returns 100.0 for salicylic acid, tagged by the dictionary as good for
     acne-prone skin, scored for an oily code: the BHA credit the old scorer's
     group names failed to give."""
     tagged = parse_ingredient_data("Salicylic Acid")
     salicylic = ing("Salicylic Acid", tagged["good_for"], tagged["bad_for"])
-    assert score("ORNT", salicylic) == 66.7
+    assert score("ORNT", salicylic) == 100.0
 
 
 # --- Reasons -----------------------------------------------------------------
