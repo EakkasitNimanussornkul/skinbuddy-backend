@@ -15,7 +15,8 @@ PROD_B_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RETINOL = {"id": "ing-retinol", "name": "Retinol", "functional_group": "Retinoid"}
 SALICYLIC = {"id": "ing-sa", "name": "Salicylic Acid",
              "functional_group": "Beta Hydroxy Acid (BHA)"}
-GLYCERIN = {"id": "ing-gly", "name": "Glycerin", "functional_group": "Humectant"}
+GLYCERIN = {"id": "ing-gly", "name": "Glycerin", "functional_group": "Humectant",
+            "good_for": "Dry Skin, Dehydrated Skin"}
 PHENOXY = {"id": "ing-phe", "name": "Phenoxyethanol", "functional_group": "Preservative"}
 
 
@@ -60,8 +61,9 @@ def test_search_omits_personalisation_for_anonymous_callers(client, patch_supaba
 
 
 def test_search_computes_a_skin_match_score_when_authenticated(client, patch_supabase):
-    """Returns skin_match_score=85 and a barrier-repair match reason for a
-    DSPT user, applying the +10 humectant bonus on the Dry axis."""
+    """Returns skin_match_score=66.7 and a match reason naming Glycerin for a
+    DSPT user: one ingredient suits dry skin and nothing is flagged,
+    (1 + 1) / (1 + 0 + 2)."""
     from app.main import app
     app.dependency_overrides[get_optional_user_id] = lambda: "user-1"
     patch_supabase(
@@ -70,9 +72,8 @@ def test_search_computes_a_skin_match_score_when_authenticated(client, patch_sup
     )
 
     result = client.get("/products/search").json()[0]
-    # Base 75 + 10 for the humectant on a Dry-axis profile.
-    assert result["skin_match_score"] == 85
-    assert any("Barrier-repair" in r for r in result["match_reasons"])
+    assert result["skin_match_score"] == 66.7
+    assert result["match_reasons"] == ["Suits dry skin: Glycerin."]
 
 
 def test_search_still_answers_when_the_callers_profile_row_is_missing(client, patch_supabase):
@@ -392,7 +393,8 @@ def test_compare_works_without_authentication(client, conflicting_catalog):
     assert resp.json()["product_a"]["skin_match_score"] is None
 
 
-ALCOHOL = {"id": "ing-alc", "name": "Alcohol Denat.", "functional_group": "Solvent"}
+ALCOHOL = {"id": "ing-alc", "name": "Alcohol Denat.", "functional_group": "Solvent",
+           "bad_for": "Extremely Dry Skin (D)"}
 
 
 @pytest.fixture
@@ -427,8 +429,8 @@ def test_compare_reports_a_partial_overlap_with_the_shared_ingredient(
 
 @pytest.fixture
 def scored_catalog(patch_supabase):
-    """Two products a DSPT profile scores differently: a humectant earns +10, a
-    volatile alcohol costs -20."""
+    """Two products a DSPT profile scores differently: one ingredient that suits
+    dry skin, and one flagged for it."""
     store = _compare_store([], [])
     store["products"] = [
         product(PROD_A_ID, "CeraVe", "Hydrating Lotion", "Moisturizer", [GLYCERIN]),
@@ -440,8 +442,9 @@ def scored_catalog(patch_supabase):
 
 
 def test_compare_scores_each_product_against_the_callers_skin_type(client, scored_catalog):
-    """Returns skin_match_score=85 for the humectant product and 55 for the
-    alcohol one, for an authenticated DSPT caller.
+    """Returns skin_match_score=66.7 for the product whose ingredient suits dry
+    skin and 33.3 for the one whose ingredient is flagged for it, for an
+    authenticated DSPT caller.
 
     Both are computed from the same profile but from each product's own
     ingredients, so the two scores must differ. Asserting only that they are
@@ -452,8 +455,8 @@ def test_compare_scores_each_product_against_the_callers_skin_type(client, score
     body = client.get("/products/compare",
                       params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID}).json()
 
-    assert body["product_a"]["skin_match_score"] == 85   # 75 base + 10 humectant
-    assert body["product_b"]["skin_match_score"] == 55   # 75 base - 20 drying alcohol
+    assert body["product_a"]["skin_match_score"] == 66.7   # (1 + 1) / (1 + 0 + 2)
+    assert body["product_b"]["skin_match_score"] == 33.3   # (0 + 1) / (0 + 1.0 + 2), High: no concern row
 
 
 # Shaped as the live catalogue shapes bad_for, e.g. "Extremely Dry Skin (D)";
@@ -705,9 +708,8 @@ def test_slug_omits_personalisation_for_an_anonymous_caller(client, patch_supaba
 
 
 def test_slug_scores_the_resolved_product_for_an_authenticated_caller(client, patch_supabase):
-    """Returns skin_match_score=85 and a barrier-repair match reason for a DSPT
-    caller, applying the +10 humectant bonus on the Dry axis to the resolved
-    product's own ingredients.
+    """Returns skin_match_score=66.7 and a match reason naming Glycerin for a
+    DSPT caller, scored from the resolved product's own ingredients.
 
     The personalising branch of this route - the users lookup feeding
     compute_product_display_fields - was previously never taken by any test."""
@@ -720,8 +722,8 @@ def test_slug_scores_the_resolved_product_for_an_authenticated_caller(client, pa
 
     body = client.get(f"/products/slug/{TARGET_SLUG}").json()
 
-    assert body["skin_match_score"] == 85   # 75 base + 10 humectant
-    assert any("Barrier-repair" in r for r in body["match_reasons"])
+    assert body["skin_match_score"] == 66.7   # Glycerin suits dry skin; Phenoxyethanol says nothing
+    assert body["match_reasons"] == ["Suits dry skin: Glycerin."]
 
 
 def test_slug_404s_for_an_identifier_that_resolves_to_nothing(client, patch_supabase):

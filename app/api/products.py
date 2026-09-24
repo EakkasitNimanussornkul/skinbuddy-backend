@@ -59,8 +59,61 @@ def postgrest_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# good_for is free text, not "(<letter>)" markers like bad_for, so each phrase
+# the catalogue uses is mapped to the Baumann trait it describes. A phrase not
+# listed here ("All Skin Types", "Rough Texture", "None", ...) describes no trait
+# and counts for no one. Keys are lower-cased; test_baumann_scoring checks that
+# every phrase the ingredient dictionary can write is either mapped or listed in
+# NEUTRAL_GOOD_FOR, so a new phrase cannot silently count for nothing.
+#
+# Nothing in the catalogue describes the Resistant, Non-pigmented or Tight
+# traits, so those letters are never helped. Dry skin is described far more
+# often than oily (43 ingredients against 4, 2026-09-25), which the score
+# reflects: it measures what the catalogue records, and that record is uneven.
+GOOD_FOR_TRAITS = {
+    "dry skin": "D", "extremely dry skin": "D", "dehydrated skin": "D",
+    "damaged barriers": "D", "compromised barriers": "D", "eczema": "D",
+    "oily skin": "O", "oily skin (in low concentration)": "O",
+    "acne-prone skin": "O", "acne-prone": "O",
+    "sensitive skin": "S", "irritated skin": "S", "redness-prone skin": "S",
+    "acne-prone skin (redness)": "S",
+    "pigmentation": "P", "dark spots": "P", "dull skin": "P",
+    "aging skin": "W", "fine lines": "W",
+}
+NEUTRAL_GOOD_FOR = {"all skin types", "none", "rough texture", "environmentally-stressed skin"}
+
+TRAIT_NAMES = {"D": "dry", "O": "oily", "S": "sensitive", "P": "pigmentation-prone", "W": "wrinkle-prone"}
+
+# How much one flagged ingredient counts against a product, by its concern's
+# grade. An unrecognised grade counts as High.
+CONCERN_WEIGHT = {"High": 1.0, "Medium": 0.6, "Low": 0.3}
+
+# Neutral points added to each side of the ratio (see compute_baumann_compatibility).
+SCORE_SMOOTHING = 1.0
+
+
+def _suited_traits(ingredient: Dict[str, Any], user_skin_type: str) -> List[str]:
+    """The letters of this code the ingredient's good_for says it suits, in code order."""
+    letters = {GOOD_FOR_TRAITS.get(part.strip().lower()) for part in (ingredient.get("good_for") or "").split(",")}
+    return [letter for letter in user_skin_type if letter in letters]
+
+
+def _list_names(names: List[str], shown: int = 3) -> str:
+    """'A', 'A and B', 'A, B and C', 'A, B, C and 4 more'."""
+    if len(names) > shown:
+        return f"{', '.join(names[:shown])} and {len(names) - shown} more"
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Evaluates product ingredients against Baumann 16-Type combinations."""
+    """How well a product's ingredients suit this Baumann code, as a percentage.
+
+    Replaces a score that started at 75 and moved in fixed steps of 5 to 25 per
+    rule, so it could only take a handful of values (60, 65, 75, 80, ...), and
+    whose rules mostly named functional groups no ingredient carries.
+    """
     # Validate the code rather than measure it. A length test passed anything
     # with four characters through to the axis checks below, which are
     # case-sensitive substring matches - so "dspt" matched no axis, adjusted
@@ -79,68 +132,54 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
         # anonymous-caller shape this endpoint serves today.
         return {"score": None, "match_reasons": [], "caution_reasons": []}
 
-    score = 75
-    match_reasons = []
-    caution_reasons = []
+    # Each ingredient is read for the traits of this code it suits (good_for)
+    # and the ones it is flagged for (bad_for, explained and graded by
+    # ingredient_concerns - the same reading the skin-type warnings use, so the
+    # score and the warnings cannot disagree). One ingredient can do both:
+    # niacinamide suits oily skin and is flagged for sensitive skin.
+    helpful: Dict[str, List[str]] = {}          # trait letter -> ingredient names, in code order
+    cautions: List[tuple] = []                  # (weight, sentence)
+    helpful_count = 0
+    concern_weight = 0.0
+    for ing in ingredients:
+        name = ing.get("name") or "An ingredient"
+        suited = _suited_traits(ing, user_skin_type)
+        if suited:
+            helpful_count += 1
+            for letter in suited:
+                helpful.setdefault(letter, []).append(name)
+        reasons = compatibility_service._skin_type_reasons(ing, user_skin_type)
+        if reasons:
+            worst = max(reasons, key=lambda r: compatibility_service._severity_rank(r.severity))
+            weight = CONCERN_WEIGHT.get(worst.severity, CONCERN_WEIGHT["High"])
+            concern_weight += weight
+            label = worst.title or f"flagged for {worst.trait}"
+            cautions.append((weight, f"{name}: {label} ({worst.severity})"))
 
-    f_groups = {ing.get("functional_group", "").strip(): ing.get("name") for ing in ingredients if ing.get("functional_group")}
-    all_names = [ing.get("name", "").lower() for ing in ingredients]
+    # Nothing in the formula says anything about this skin type either way.
+    # A number here would be a guess; None is what every consumer already
+    # shows as "not scored".
+    if helpful_count == 0 and concern_weight == 0:
+        return {"score": None, "match_reasons": [], "caution_reasons": []}
 
-    # Axis 1: Oily (O) vs. Dry (D)
-    if "D" in user_skin_type:
-        if any(g in f_groups for g in ["Humectant", "Barrier Support", "Heavy Occlusive"]):
-            score += 10
-            match_reasons.append("Barrier-repair formula: Contains humectants and lipids that deeply replenish dry skin.")
-        if any(any(bad in n for bad in ["alcohol denat", "isopropyl alcohol"]) for n in all_names):
-            score -= 20
-            caution_reasons.append("Drying risk: High concentrations of volatile alcohols may strip natural barrier moisture.")
-    elif "O" in user_skin_type:
-        # The group names must match what the catalogue actually stores, which is
-        # set by ingredient_dictionary.py at ingest. This list checked "Direct
-        # Acid (BHA)" and "Direct Acid (AHA/BHA)", names no ingredient has ever
-        # carried, so the only BHA and AHA products in the catalogue never got
-        # the oil-control bonus while niacinamide, the one name that did match,
-        # did. The old "(AHA/BHA)" shows both acids were meant to count.
-        #
-        # Other axes still name groups the catalogue does not use (Heavy
-        # Occlusive, Barrier Support, Botanical Soother, Peptide, Antioxidant,
-        # Active Acid Component). Mapping those is a judgment about which real
-        # group each was meant to be, not a rename, and is left as a known
-        # limitation.
-        if any(g in f_groups for g in ["Beta Hydroxy Acid (BHA)", "Alpha Hydroxy Acid (AHA)", "Vitamin B3"]):
-            score += 10
-            match_reasons.append("Oil-control support: Formulated with clarifying actives to regulate excess sebum.")
-        if any(g == "Heavy Occlusive" for g in f_groups):
-            score -= 15
-            caution_reasons.append("Heavy texture warning: Rich occlusive emollients may feel heavy or congest oily pores.")
+    # Helpful ingredients against weighted concerns, each side padded by one
+    # neutral point so a single ingredient cannot pin a product to 0% or 100%:
+    # one Low concern alone gives 43, one helpful ingredient alone gives 67,
+    # and only a formula with many of either reaches the ends of the scale.
+    score = 100 * (helpful_count + SCORE_SMOOTHING) / (helpful_count + concern_weight + 2 * SCORE_SMOOTHING)
 
-    # Axis 2: Sensitive (S) vs. Resistant (R)
-    if "S" in user_skin_type:
-        if any(g in f_groups for g in ["Botanical Soother", "Pro-Vitamin B5"]):
-            score += 10
-            match_reasons.append("Calming complex: Features soothing botanicals to visibly relieve redness and irritation.")
-        if any("parfum" in n or "fragrance" in n for n in all_names):
-            score -= 25
-            caution_reasons.append("Sensitivity trigger: Contains synthetic fragrance/parfum which frequently triggers contact dermatitis.")
-    elif "R" in user_skin_type:
-        score += 5
-
-    # Axis 3: Pigmented (P) vs. Non-Pigmented (N)
-    if "P" in user_skin_type:
-        if any(g in f_groups for g in ["Vitamin C", "Vitamin B3", "Active Acid Component"]):
-            score += 10
-            match_reasons.append("Tone-refining profile: Includes targeted brightening actives to fade post-acne marks and hyperpigmentation.")
-
-    # Axis 4: Wrinkle-Prone (W) vs. Tight (T)
-    if "W" in user_skin_type:
-        if any(g in f_groups for g in ["Retinoid", "Peptide", "Antioxidant"]):
-            score += 10
-            match_reasons.append("Cellular renewal: Powered by age-supporting actives that stimulate collagen and smooth fine lines.")
+    # rstrip before the full stop: "Alcohol Denat." would otherwise end "Denat..".
+    match_reasons = [
+        f"Suits {TRAIT_NAMES[letter]} skin: {_list_names(names).rstrip('.')}."
+        for letter in user_skin_type if (names := helpful.get(letter))
+    ]
+    # Most serious first. Stable, so equal weights keep ingredient order.
+    caution_reasons = [sentence for _, sentence in sorted(cautions, key=lambda c: -c[0])]
 
     return {
-        "score": max(15, min(99, score)),
-        "match_reasons": match_reasons if match_reasons else ["Suitable for daily routine wear."],
-        "caution_reasons": caution_reasons
+        "score": round(score, 1),
+        "match_reasons": match_reasons,
+        "caution_reasons": caution_reasons,
     }
 
 async def resolve_product_record(identifier: str) -> dict or None:
@@ -414,7 +453,9 @@ async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(g
             if user_res.data:
                 user_skin_type = user_res.data[0].get("skin_type") or ""
 
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*))").eq("id", product_id).limit(1).execute()
+        # ingredient_concerns grades the concerns the match score weighs; every
+        # other product fetch here already selects it.
+        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", product_id).limit(1).execute()
 
         if not res.data:
             raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")

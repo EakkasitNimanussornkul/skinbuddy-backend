@@ -1,7 +1,11 @@
 """Unit tests for compute_baumann_compatibility (app/api/products.py).
 
-Pure scoring function: Baumann code + ingredient list -> score/reasons.
-Base score is 75; each axis adjusts it, and the result is clamped to 15..99.
+The skin match score: how well a product's ingredients suit a Baumann code, as
+a percentage. Each ingredient counts as helpful when its good_for describes a
+trait of the code, and as a concern when its bad_for flags one, weighted by
+its ingredient_concerns grade (High 1.0, Medium 0.6, Low 0.3). The score is
+(helpful + 1) / (helpful + concerns + 2) x 100, rounded to one decimal place,
+and None when no ingredient says anything about the code.
 
 Docstrings state the expected output, and are lifted verbatim into the
 "Expected Unit Output" field of the generated Test Record.
@@ -9,139 +13,198 @@ Docstrings state the expected output, and are lifted verbatim into the
 
 import pytest
 
-from app.api.products import compute_baumann_compatibility
-from app.core.services.ingredient_dictionary import parse_ingredient_data
+from app.api.products import GOOD_FOR_TRAITS, NEUTRAL_GOOD_FOR, compute_baumann_compatibility
+from app.core.services.ingredient_dictionary import CLINICAL_DICTIONARY, parse_ingredient_data
 
 
-def ing(name, group=None):
-    return {"name": name, "functional_group": group} if group else {"name": name}
+def ing(name, good_for=None, bad_for=None, *concerns):
+    return {"name": name, "good_for": good_for, "bad_for": bad_for,
+            "ingredient_concerns": list(concerns)}
+
+
+def concern(target_profile, severity, title="A concern"):
+    return {"concern_title": title, "concern_description": "Because.",
+            "target_profile": target_profile, "severity": severity}
+
+
+def score(code, *ingredients):
+    return compute_baumann_compatibility(code, list(ingredients))["score"]
+
+
+GLYCERIN = ing("Glycerin", "Dry Skin, Dehydrated Skin")
+WATER = ing("Water", "All Skin Types")
 
 
 # --- Guard clause ------------------------------------------------------------
 
 # "dspt", "XXXX" and "DSPTX" are the cases a length-based guard lets through:
-# they are four or more characters, so they reach the case-sensitive axis checks,
-# match none of them, and score a bare 75 that reads as a real evaluation. The
-# shorter codes take the other limb. Both must reach the same answer.
+# four or more characters, but not a Baumann code. Every invalid code must get
+# the same answer as a missing one. (FE-DEF-10)
 @pytest.mark.parametrize(
     "invalid_code", ["", None, "DS", "X", "dspt", "XXXX", "DSPTX", "1234"]
 )
 def test_invalid_skin_type_code_returns_no_score(invalid_code):
     """Returns no score, and neither match nor caution reasons, when the
     skin-type code is not one of the sixteen valid Baumann codes."""
-    result = compute_baumann_compatibility(invalid_code, [])
-    assert result["score"] is None
-    assert result["match_reasons"] == []
-    assert result["caution_reasons"] == []
+    result = compute_baumann_compatibility(invalid_code, [GLYCERIN])
+    assert result == {"score": None, "match_reasons": [], "caution_reasons": []}
 
 
 def test_valid_skin_type_code_is_still_scored():
-    """Returns a numeric score for a valid Baumann code, so that rejecting
-    invalid codes cannot be satisfied by refusing to score anything."""
-    result = compute_baumann_compatibility("DSPT", [])
-    assert isinstance(result["score"], int)
-    assert 15 <= result["score"] <= 99
+    """Returns a numeric score for a valid Baumann code and an ingredient that
+    suits it, so that rejecting invalid codes cannot be satisfied by refusing to
+    score anything."""
+    assert isinstance(score("DSPT", GLYCERIN), float)
 
 
-# --- Axis 1: Oily (O) vs Dry (D) ---------------------------------------------
+# --- No evidence -------------------------------------------------------------
 
-def test_dry_skin_rewards_humectants():
-    """Returns 85 (base 75 + 10) and a barrier-repair match reason for a
-    humectant scored against a Dry-axis profile."""
-    result = compute_baumann_compatibility("DSPT", [ing("Glycerin", "Humectant")])
-    assert result["score"] == 85  # 75 base + 10
-    assert any("Barrier-repair" in r for r in result["match_reasons"])
-
-
-def test_dry_skin_penalises_drying_alcohol():
-    """Returns 55 (base 75 - 20) and a drying-risk caution for a volatile alcohol
-    scored against a Dry-axis profile."""
-    result = compute_baumann_compatibility("DSPT", [ing("Alcohol Denat.", "Solvent")])
-    assert result["score"] == 55  # 75 base - 20
-    assert any("Drying risk" in r for r in result["caution_reasons"])
+def test_a_product_saying_nothing_about_the_code_is_not_scored():
+    """Returns no score, and no reasons, when no ingredient suits or is flagged
+    for any trait of the code, rather than a number that would only be a guess."""
+    result = compute_baumann_compatibility("DSPT", [WATER, ing("Mystery Compound")])
+    assert result == {"score": None, "match_reasons": [], "caution_reasons": []}
 
 
-def test_oily_skin_penalises_heavy_occlusives():
-    """Returns 60 (base 75 - 15) and a heavy-texture caution for an occlusive
-    scored against an Oily-axis profile."""
-    result = compute_baumann_compatibility("OSPT", [ing("Petrolatum", "Heavy Occlusive")])
-    assert result["score"] == 60  # 75 base - 15
-    assert any("Heavy texture" in r for r in result["caution_reasons"])
+def test_good_for_a_trait_outside_the_code_does_not_count():
+    """Returns no score for an oily-skin code and a product whose only described
+    benefit is for dry skin."""
+    assert score("OSPT", GLYCERIN) is None
 
 
-def test_oily_skin_rewards_oil_control_actives():
-    """Returns 95 with two match reasons: niacinamide scores on two axes at once,
-    +10 for sebum control on the O axis and +10 for tone refining on the P axis."""
-    result = compute_baumann_compatibility("OSPT", [ing("Niacinamide", "Vitamin B3")])
-    assert result["score"] == 95  # 75 base + 10 (O) + 10 (P)
-    assert len(result["match_reasons"]) == 2
+def test_all_skin_types_counts_for_no_one():
+    """Returns no score for a product of ingredients tagged "All Skin Types",
+    which describes no trait, so it cannot lift every product for every user."""
+    assert score("DSPT", WATER, WATER) is None
 
 
-# The group is taken from parse_ingredient_data, the function that tags every
-# ingredient at ingest, rather than typed out here. The scorer compares group
-# names as exact strings, so a test that types them can agree with the scorer
-# while the catalogue uses a different name. That is how "Direct Acid (BHA)"
-# passed review: nothing checked it against what the catalogue stores. If either
-# file renames a group, this now fails.
-#
-# ORNT so only the oil-control bonus is in play: R adds its flat +5, and neither
-# acid belongs to a group the N or T axes reward.
-@pytest.mark.parametrize("acid", ["Salicylic Acid", "Glycolic Acid"])
-def test_oily_skin_rewards_the_catalogues_hydroxy_acids(acid):
-    """Returns 90 (base 75 + 5 Resistant + 10 oil control) and an oil-control
-    match reason for a BHA or AHA tagged with the group the catalogue assigns
-    it, scored against an Oily-axis profile."""
-    group = parse_ingredient_data(acid)["group"]
+# --- The formula -------------------------------------------------------------
 
-    result = compute_baumann_compatibility("ORNT", [ing(acid, group)])
-
-    assert result["score"] == 90  # 75 base + 5 (R) + 10 (O)
-    assert any("Oil-control" in r for r in result["match_reasons"])
+def test_one_helpful_ingredient_scores_two_thirds():
+    """Returns 66.7 for one ingredient that suits the code and nothing flagged:
+    (1 + 1) / (1 + 0 + 2)."""
+    assert score("DSPT", GLYCERIN) == 66.7
 
 
-# --- Axis 2: Sensitive (S) vs Resistant (R) ----------------------------------
-
-def test_sensitive_skin_penalises_fragrance_heavily():
-    """Returns 50 (base 75 - 25) and a sensitivity-trigger caution for fragrance
-    scored against a Sensitive-axis profile."""
-    result = compute_baumann_compatibility("DSPT", [ing("Parfum", "Fragrance Component")])
-    assert result["score"] == 50  # 75 base - 25
-    assert any("Sensitivity trigger" in r for r in result["caution_reasons"])
+def test_more_helpful_ingredients_score_higher_but_never_100():
+    """Returns a higher score for more helpful ingredients, 91.7 for ten, and
+    never 100, so a formula cannot claim a perfect match from its tags alone."""
+    ten = [GLYCERIN] * 10
+    assert score("DSPT", *ten) == 91.7   # (10 + 1) / (10 + 0 + 2)
+    assert score("DSPT", *ten) > score("DSPT", GLYCERIN)
 
 
-def test_resistant_skin_gets_small_bonus():
-    """Returns 80 (base 75 + 5) for a Resistant-axis profile with no ingredients."""
-    assert compute_baumann_compatibility("ORNT", [])["score"] == 80  # 75 base + 5
+@pytest.mark.parametrize("grade, expected", [("High", 33.3), ("Medium", 38.5), ("Low", 43.5)])
+def test_a_single_concern_is_weighed_by_its_grade(grade, expected):
+    """Returns 33.3, 38.5 or 43.5 for one flagged ingredient graded High,
+    Medium (the concerns table's Moderate) or Low, and nothing helpful:
+    1 / (weight + 2). A Low concern costs less than a High one, and none of them
+    reaches 0."""
+    table_grade = "Moderate" if grade == "Medium" else grade
+    flagged = ing("Salicylic Acid", None, "Extremely Dry Skin (D)",
+                  concern("Extremely Dry Skin (D)", table_grade))
+    assert score("DSPT", flagged) == expected
 
 
-# --- Axis 4: Wrinkle-prone (W) -----------------------------------------------
-
-def test_wrinkle_prone_rewards_retinoids():
-    """Returns 90 (base 75 + 5 Resistant + 10 Wrinkle-prone) for a retinoid."""
-    result = compute_baumann_compatibility("DRNW", [ing("Retinol", "Retinoid")])
-    assert result["score"] == 90  # 75 base + 5 (R) + 10 (W)
-
-
-# --- Invariants --------------------------------------------------------------
-
-def test_score_is_always_clamped_between_15_and_99():
-    """Returns a score within 15..99 for every skin-type code, even when several
-    penalties stack on the same product."""
-    stacked_penalties = [ing("Alcohol Denat.", "Solvent"), ing("Parfum", "Fragrance Component")]
-    for code in ("DSPT", "OSPW", "DRNW", "ORNT"):
-        score = compute_baumann_compatibility(code, stacked_penalties)["score"]
-        assert 15 <= score <= 99
+def test_an_ingredient_flagged_for_two_traits_weighs_its_worst_grade():
+    """Returns 33.3, the High weight, for one ingredient flagged Moderate for dry
+    skin and High for sensitive skin, scored for DSPT: it counts once, at its
+    more serious grade, not at whichever trait comes first in the code."""
+    alcohol = ing("Alcohol Denat.", None, "Extremely Dry Skin (D), Highly Sensitive Skin (S)",
+                  concern("Extremely Dry Skin (D)", "Moderate"),
+                  concern("Highly Sensitive Skin (S)", "High"))
+    assert score("DSPT", alcohol) == 33.3
 
 
-def test_match_reasons_never_empty():
-    """Returns the fallback reason "Suitable for daily routine wear." rather than
-    an empty list when no axis rule matches. The UI renders this list directly."""
-    result = compute_baumann_compatibility("ORNT", [ing("Water", "Solvent")])
-    assert result["match_reasons"] == ["Suitable for daily routine wear."]
+def test_an_unrecognised_concern_grade_weighs_as_high():
+    """Returns 33.3, the High weight, for a flagged ingredient whose concern
+    carries a grade the scale does not know."""
+    flagged = ing("Salicylic Acid", None, "Extremely Dry Skin (D)",
+                  concern("Extremely Dry Skin (D)", "Critical"))
+    assert score("DSPT", flagged) == 33.3
 
 
-def test_ingredients_without_functional_group_are_tolerated():
-    """Returns a valid score without raising when an ingredient has no
-    functional_group, which is common for newly ingested catalogue rows."""
-    result = compute_baumann_compatibility("DSPT", [ing("Mystery Compound")])
-    assert 15 <= result["score"] <= 99
+def test_an_ingredient_can_suit_one_trait_and_be_flagged_for_another():
+    """Returns 55.6 for niacinamide scored for OSPT: it suits oily skin and is
+    flagged Moderate for sensitive skin, so it counts on both sides:
+    (1 + 1) / (1 + 0.6 + 2)."""
+    niacinamide = ing("Niacinamide", "Oily Skin, Acne-Prone", "Highly Sensitive Skin (S)",
+                      concern("Highly Sensitive Skin (S)", "Moderate"))
+    assert score("OSPT", niacinamide) == 55.6
+
+
+def test_the_score_is_not_confined_to_steps_of_five():
+    """Returns a score that is not a multiple of 5, 58.8 for five helpful
+    ingredients against two High and two Medium concerns, since the old scorer
+    could only move in fixed steps."""
+    flagged_high = ing("Retinol", None, "Sensitive Skin (S)", concern("Sensitive Skin (S)", "High"))
+    flagged_medium = ing("Niacinamide", None, "Highly Sensitive Skin (S)",
+                         concern("Highly Sensitive Skin (S)", "Moderate"))
+    result = score("DSPT", *[GLYCERIN] * 5, flagged_high, flagged_high, flagged_medium, flagged_medium)
+    assert result == 58.8   # (5 + 1) / (5 + 3.2 + 2) = 6 / 10.2
+    assert result % 5 != 0
+
+
+# --- The vocabulary ----------------------------------------------------------
+
+def test_every_good_for_phrase_the_dictionary_writes_is_accounted_for():
+    """Returns every good_for phrase the ingredient dictionary can store as
+    either mapped to a trait or deliberately neutral, so a phrase added there
+    cannot silently count for nothing - the way functional-group names the
+    catalogue never used once went unnoticed in the old scorer."""
+    phrases = {part.strip().lower()
+               for entry in CLINICAL_DICTIONARY.values()
+               for part in entry["good_for"].split(",")}
+    for probe in ("fragrance", "ceramide x", "xanthan gum", "rose extract",
+                  "butylene glycol", "cyclopentasiloxane", "propylparaben", "unknown thing"):
+        phrases |= {part.strip().lower() for part in parse_ingredient_data(probe)["good_for"].split(",")}
+    unaccounted = phrases - set(GOOD_FOR_TRAITS) - NEUTRAL_GOOD_FOR
+    assert unaccounted == set()
+
+
+def test_salicylic_acid_counts_for_oily_skin_through_its_dictionary_tag():
+    """Returns 66.7 for salicylic acid, tagged by the dictionary as good for
+    acne-prone skin, scored for an oily code: the BHA credit the old scorer's
+    group names failed to give."""
+    tagged = parse_ingredient_data("Salicylic Acid")
+    salicylic = ing("Salicylic Acid", tagged["good_for"], tagged["bad_for"])
+    assert score("ORNT", salicylic) == 66.7
+
+
+# --- Reasons -----------------------------------------------------------------
+
+def test_match_reasons_name_the_ingredients_for_each_trait_in_code_order():
+    """Returns one match reason per trait of the code that something suits, in
+    the order of the code, naming up to three ingredients and counting the
+    rest."""
+    result = compute_baumann_compatibility("DSPW", [
+        ing("Retinol", "Aging Skin"),
+        ing("Glycerin", "Dry Skin"), ing("Squalane", "Dry Skin"),
+        ing("Ceramide NP", "Dry Skin"), ing("Cholesterol", "Dry Skin"),
+    ])
+    assert result["match_reasons"] == [
+        "Suits dry skin: Glycerin, Squalane, Ceramide NP and 1 more.",
+        "Suits wrinkle-prone skin: Retinol.",
+    ]
+
+
+def test_a_reason_ending_in_an_abbreviation_gets_one_full_stop():
+    """Returns "Suits oily skin: Alcohol Denat." with a single full stop when
+    the last ingredient named ends in one, not "Denat.."."""
+    result = compute_baumann_compatibility("OSPT", [ing("Alcohol Denat.", "Oily Skin")])
+    assert result["match_reasons"] == ["Suits oily skin: Alcohol Denat."]
+
+
+def test_caution_reasons_name_each_concern_most_serious_first():
+    """Returns one caution per flagged ingredient, most serious first, naming
+    the concern and its grade, or the flagged trait when no concern explains
+    it."""
+    result = compute_baumann_compatibility("DSPT", [
+        ing("Caprylyl Glycol", None, "Extremely Sensitive Skin (S)",
+            concern("Extremely Sensitive Skin (S)", "Low", title="Preservative Sensitivity")),
+        ing("Alcohol", None, "Extremely Dry Skin (D)"),
+    ])
+    assert result["caution_reasons"] == [
+        "Alcohol: flagged for Extremely Dry Skin (D) (High)",
+        "Caprylyl Glycol: Preservative Sensitivity (Low)",
+    ]
