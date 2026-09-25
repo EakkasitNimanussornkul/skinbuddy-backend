@@ -19,7 +19,7 @@ def _get_product_catalog(user_id: str) -> List[dict]:
     first — anything recommended is added to storage on apply."""
     products = (
         supabase.table("products")
-        .select("id, brand, name, category")
+        .select("id, brand, name, category, image_url")
         .limit(PRODUCT_LIMIT)
         .execute()
     )
@@ -38,6 +38,7 @@ def _get_product_catalog(user_id: str) -> List[dict]:
             "name": p.get("name"),
             "brand": p.get("brand"),
             "category": p.get("category"),
+            "image_url": p.get("image_url"),
             "owned": p["id"] in owned,
         })
     return catalog
@@ -186,6 +187,7 @@ Respond with STRICT JSON only (no markdown, no prose) in exactly this shape:
             "product_name": valid[pid]["name"],
             "brand": valid[pid].get("brand"),
             "category": valid[pid].get("category"),
+            "image_url": valid[pid].get("image_url"),
             "owned": valid[pid]["owned"],
             "step_order": s.get("step_order", i + 1),
             "time_of_day": s.get("time_of_day", "both"),
@@ -208,8 +210,8 @@ def generate_routine(user_id: str, followup_answers: str = "") -> dict:
     to the LLM to resolve anything it found.
 
     Returns either:
-      { "steps": [ { product_id, product_name, category, step_order,
-                     time_of_day, frequency, reason, caution } ],
+      { "steps": [ { product_id, product_name, brand, category, image_url, owned,
+                     step_order, time_of_day, frequency, reason, caution } ],
         "validation": { status, conflicts_found, findings } }
     or an error dict: { "error": "no_products" | "llm_failure", "message": str }
     """
@@ -286,6 +288,7 @@ Respond with STRICT JSON only (no markdown, no prose) in exactly this shape:
             "product_name": valid[pid]["name"],
             "brand": valid[pid].get("brand"),
             "category": valid[pid].get("category"),
+            "image_url": valid[pid].get("image_url"),
             "owned": valid[pid]["owned"],
             "step_order": s.get("step_order", i + 1),
             "time_of_day": s.get("time_of_day", "both"),
