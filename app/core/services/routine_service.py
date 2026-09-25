@@ -161,7 +161,7 @@ RULES
 - Respond in English.
 
 Respond with STRICT JSON only (no markdown, no prose) in exactly this shape:
-{{"steps":[{{"product_id":"<id>","step_order":1,"time_of_day":"AM|PM|both","frequency":"daily|3x_week|2x_week|weekly","reason":"one short sentence","caution":"short warning or empty string"}}]}}"""
+{{"steps":[{{"product_id":"<id>","step_order":1,"time_of_day":"AM|PM|both","frequency":"daily|3x_week|2x_week|weekly","reason":"why this step, 12 words max","caution":"warning in 12 words max, or empty string"}}]}}"""
 
     try:
         response = llm.invoke([
@@ -262,10 +262,12 @@ RULES
     Retinoids ~3x_week. Strong weekly treatments/masks = weekly.
 - For "caution": if the product has a notable irritant / sun-sensitising / "start
   slow" concern, give a short warning; otherwise use an empty string "".
+- Keep "reason" and "caution" to 12 words or fewer each. They are shown on a small
+  card beside the product photo, so plain, short phrases read best.
 - Respond in English.
 
 Respond with STRICT JSON only (no markdown, no prose) in exactly this shape:
-{{"steps":[{{"product_id":"<id>","step_order":1,"time_of_day":"AM|PM|both","frequency":"daily|3x_week|2x_week|weekly","reason":"one short sentence","caution":"short warning or empty string"}}]}}"""
+{{"steps":[{{"product_id":"<id>","step_order":1,"time_of_day":"AM|PM|both","frequency":"daily|3x_week|2x_week|weekly","reason":"why this step, 12 words max","caution":"warning in 12 words max, or empty string"}}]}}"""
 
     try:  # [E2] LLM/API failure
         response = llm.invoke([SystemMessage(content=system), HumanMessage(content="Generate the routine now.")])
