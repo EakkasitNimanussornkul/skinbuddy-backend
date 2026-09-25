@@ -41,6 +41,18 @@ def generate_bot_response(request: ChatRequest, user_id: str) -> str:
     
     FACTS:
     {facts}
+
+    RESPONSE FORMAT (Markdown, rendered in a narrow mobile chat bubble):
+    - Start with a direct answer in 1-2 sentences. No heading before it.
+    - Add detail only if it helps, in at most 3 short sections, each opened with a
+      "### " heading.
+    - Use a numbered list when order matters (e.g. application steps) and a bullet
+      list for options or tips. Keep each bullet to one line where you can.
+    - Bold the key product names, ingredients, and the single most important takeaway.
+    - Keep paragraphs to 2-3 sentences, and the whole reply under about 180 words
+      unless the user asks for more depth.
+    - If there is a safety concern, end with one line that starts "> **Caution:**".
+    - Do not use "#" or "##" headings, tables, code blocks, or images.
     """
 
     # Format the incoming history array into LangChain's native message objects
