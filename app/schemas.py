@@ -38,12 +38,36 @@ class QuizResultCreate(BaseModel):
     _validate_skin_type = field_validator("skinType")(validate_baumann_skin_type)
 
 # 3. INGREDIENT & CONCERN SUB-MODELS
+
+# A published source a claim rests on (migration 0009). Declared here so every
+# response model that nests ingredients, concerns or conflict pairs carries it:
+# a model that does not declare a field drops it silently on the way out.
+class SourceRef(BaseModel):
+    id: str
+    title: str
+    publisher: Optional[str] = None
+    url: Optional[str] = None
+    source_type: str        # regulatory_register | safety_review | chemical_database | peer_reviewed | reference_book | product_database
+    accessed_on: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class IngredientSourceLink(BaseModel):
+    claim: str              # which stored claim the source backs: function | benefits | good_for | bad_for
+    sources: Optional[SourceRef] = None
+
+
+class ConcernSourceLink(BaseModel):
+    sources: Optional[SourceRef] = None
+
+
 class IngredientConcern(BaseModel):
     id: Optional[str] = None
     concern_title: Optional[str] = None
     concern_description: Optional[str] = None
     target_profile: Optional[str] = None
     severity: Optional[str] = 'Moderate'
+    concern_sources: List[ConcernSourceLink] = []
 
     class Config:
         from_attributes = True
@@ -56,6 +80,7 @@ class Ingredient(BaseModel):
     bad_for: Optional[str] = None
     functional_group: Optional[str] = None
     ingredient_concerns: List[IngredientConcern] = []
+    ingredient_sources: List[IngredientSourceLink] = []
 
     class Config:
         from_attributes = True
@@ -107,10 +132,15 @@ class MatchBreakdown(BaseModel):
     considered: int           # ingredients that said anything about the code (helpful, concern, or both)
     total_ingredients: int    # every ingredient in the product
     limited: bool             # fewer than 3 considered: the score rests on too little to lean on
+    # Of `considered`, how many are backed by a source on every side they count:
+    # a good_for source for a helpful one; a bad_for source, or a source on the
+    # concern that graded it, for a concern; both when counted on both sides.
+    verified_considered: int = 0
 
 
 class ProductDetail(ProductResponse):
     description: Optional[str] = None
+    source_url: Optional[str] = None   # the product's page in Open Beauty Facts, when that is where it came from
     price_thb: Optional[float] = None
     price_usd: Optional[float] = None
     product_ingredients: List[ProductIngredient] = []
@@ -168,6 +198,7 @@ class ConflictDetail(BaseModel):
     ingredient: str                               # the checked product's ingredient(s)
     conflicting_ingredient: Optional[str] = None  # the other product's ingredient
     message: str
+    sources: List[SourceRef] = []                 # what the rule behind this pair rests on
 
 
 class SkinTypeReason(BaseModel):
@@ -176,6 +207,7 @@ class SkinTypeReason(BaseModel):
     title: Optional[str] = None         # from ingredient_concerns, when one covers this trait
     description: Optional[str] = None
     severity: str                       # the concern's, on the High/Medium/Low scale; "High" when none
+    sources: List[SourceRef] = []       # what that concern rests on; [] when none, or no concern
 
 
 class WarningAlert(BaseModel):

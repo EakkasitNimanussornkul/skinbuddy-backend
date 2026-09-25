@@ -385,6 +385,7 @@ def test_analyze_explains_a_skin_type_conflict_from_its_concern(
         "title": "Barrier Dehydration Risk",
         "description": "BHA dissolves surface oils an already-dry barrier needs.",
         "severity": "Medium",
+        "sources": [],
     }]
     assert warning["message"] == (
         "Personalized Alert: Salicylic Acid is known to trigger adverse "
@@ -431,7 +432,7 @@ def test_analyze_names_the_trait_when_no_concern_explains_it(
 
     assert warning["severity"] == "High"
     assert warning["reasons"] == [{"trait": "Extremely Dry Skin (D)", "title": None,
-                                   "description": None, "severity": "High"}]
+                                   "description": None, "severity": "High", "sources": []}]
 
 
 # --- Each real conflict, stated exactly once (BE-DEF-12, BE-DEF-13) ----------
@@ -697,6 +698,31 @@ def test_analyze_keeps_a_separate_warning_for_each_clashing_product(
     }
     [skin] = [w for w in warnings if w["conflicting_product"] is None]
     assert skin["alert_type"] == "Skin Type Conflict"
+
+
+def test_analyze_gives_each_conflict_pair_the_sources_of_its_rule(
+        client, patch_supabase, as_user):
+    """Returns, on every detail of a conflict warning, the source rows linked to
+    the rule that produced it - the category rule's for a functional-group pair,
+    the curated rule's for an ingredient pair - so each clash can say what it
+    rests on."""
+    as_user("user-1")
+    category_source = {"id": "src-cat", "title": "Category rule source", "source_type": "peer_reviewed"}
+    pair_source = {"id": "src-pair", "title": "Pair rule source", "source_type": "safety_review"}
+    store = grouping_store(
+        [PEPTIDE_SERUM, RETINOID_SHELF_SERUM],
+        [{**BHA_VS_PEPTIDE_RULE, "category_rule_sources": [{"sources": category_source}]}])
+    store["conflict_rules"] = [{**RETINOL_VS_SA_RULE,
+                                "conflict_rule_sources": [{"sources": pair_source}, {"sources": None}]}]
+    patch_supabase(store, "app.core.services.compatibility_service", "app.api.shelf")
+
+    warnings = {w["conflicting_product"]: w for w in client.get("/shelf/analyze/prod-bha").json()["warnings"]}
+
+    serum = warnings["Multi-Technology Peptide Serum"]
+    assert len(serum["details"]) == 3
+    assert all([src["title"] for src in d["sources"]] == ["Category rule source"] for d in serum["details"])
+    [retinol_pair] = warnings["Retinol 0.2% in Squalane"]["details"]
+    assert [src["title"] for src in retinol_pair["sources"]] == ["Pair rule source"]
 
 
 def test_analyze_does_not_report_a_product_that_could_not_be_assessed_as_safe(

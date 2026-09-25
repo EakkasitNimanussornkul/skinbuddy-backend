@@ -14,7 +14,7 @@ router = APIRouter()
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
         response = supabase.table("shelf_items") \
-            .select("*, products(*, product_ingredients(ingredients(*)))") \
+            .select("*, products(*, product_ingredients(ingredients(*, ingredient_sources(claim, sources(*)))))") \
             .eq("user_id", user_id) \
             .execute()
         

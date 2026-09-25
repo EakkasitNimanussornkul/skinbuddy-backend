@@ -12,6 +12,16 @@ from app.core.services.ingredient_dictionary import parse_ingredient_data
 from app.core.services.image_service import fetch_and_store_product_image
 
 OBF_SEARCH_URL = "https://world.openbeautyfacts.org/api/v2/search"
+OBF_PRODUCT_URL = "https://world.openbeautyfacts.org/product/{code}"
+
+
+def obf_product_url(code) -> str | None:
+    """The Open Beauty Facts page for a product, from the barcode its API
+    returns as `code`, stored as products.source_url (migration 0009) so each
+    imported product credits where it came from. None when there is no usable
+    barcode: a missing link is better than a wrong one."""
+    code = str(code or "").strip()
+    return OBF_PRODUCT_URL.format(code=code) if code.isdigit() else None
 TARGET_BRANDS = ["COSRX", "CeraVe", "The Ordinary", "Paula's Choice", "Eucerin", "Laneige", "Innisfree"]
 
 # 🌟 PRODUCT NAME TRANSLATION & SANITIZATION MAP 🌟
@@ -113,6 +123,10 @@ async def ingest_clean_brand(client: httpx.AsyncClient, brand_name: str, categor
         # failure on a re-run never blanks out a previously-stored image.
         if stored_image_url:
             product_payload["image_url"] = stored_image_url
+        # Same rule for the source link: never overwrite a known page with nothing.
+        source_url = obf_product_url(item.get("code"))
+        if source_url:
+            product_payload["source_url"] = source_url
 
         existing_prod = supabase.table("products").select("id").eq("name", name).eq("brand", brand).execute()
         if existing_prod.data:

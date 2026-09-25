@@ -377,6 +377,16 @@ def _warning_severity(concern_severity: Optional[str]) -> str:
     return _CONCERN_TO_WARNING_SEVERITY.get(raw.lower(), raw.title())
 
 
+def linked_sources(links: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """The source rows behind a junction join such as concern_sources(sources(*)).
+
+    PostgREST returns each link as {"sources": {...}}, or {"sources": None} if
+    the source row is gone; only real rows are kept. Tables from migration
+    0009 start empty, so this is [] until a source has been checked and linked.
+    """
+    return [link["sources"] for link in (links or []) if link.get("sources")]
+
+
 def _skin_type_reasons(ingredient: Dict[str, Any], user_skin_type: str) -> List[SkinTypeReason]:
     """Why an ingredient is a poor fit for this Baumann code, one entry per
     trait of the code its bad_for flags. Empty when nothing matches.
@@ -415,6 +425,7 @@ def _skin_type_reasons(ingredient: Dict[str, Any], user_skin_type: str) -> List[
                 title=concern.get("concern_title"),
                 description=concern.get("concern_description"),
                 severity=_warning_severity(concern.get("severity")),
+                sources=linked_sources(concern.get("concern_sources")),
             ))
     return reasons
 
@@ -537,7 +548,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
         supabase.table("products")
         # ingredient_concerns explains the skin-type pass below; nothing else
         # here reads it.
-        .select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
+        .select("*, product_ingredients(ingredients(*, ingredient_concerns(*, concern_sources(sources(*)))))")
         .eq("id", product_id)
         .limit(1)
         .execute()
@@ -611,7 +622,8 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
 
     # --- PASS 1: ingredient-to-ingredient (conflict_rules) ---
     if target_ingredient_ids and comparison_ingredient_ids:
-        specific_rules = supabase.table("conflict_rules").select("*").execute()
+        # Each rule's sources come in the same query, not one query per rule.
+        specific_rules = supabase.table("conflict_rules").select("*, conflict_rule_sources(sources(*))").execute()
         for rule in (specific_rules.data or []):
             id_a = rule.get("ingredient_a_id")
             id_b = rule.get("ingredient_b_id")
@@ -654,6 +666,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                         ingredient=target_ing_name,
                         conflicting_ingredient=comp_ing_name,
                         message=message,
+                        sources=linked_sources(rule.get("conflict_rule_sources")),
                     )],
                 ))
                 if comp_ing_name:
@@ -664,7 +677,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
 
     # --- PASS 2: functional-group / category (category_conflict_rules) ---
     if target_groups and comparison_groups:
-        rules_res = supabase.table("category_conflict_rules").select("*").execute()
+        rules_res = supabase.table("category_conflict_rules").select("*, category_rule_sources(sources(*))").execute()
         for rule in (rules_res.data or []):
             rule_a = normalize_text_accents(rule.get("group_a"))
             rule_b = normalize_text_accents(rule.get("group_b"))
@@ -697,6 +710,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
                         ingredient=target_ing_names,
                         conflicting_ingredient=comp_ing_name,
                         message=message,
+                        sources=linked_sources(rule.get("category_rule_sources")),
                     )],
                 ))
 

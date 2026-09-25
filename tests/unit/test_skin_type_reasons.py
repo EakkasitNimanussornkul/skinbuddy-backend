@@ -104,3 +104,24 @@ def test_each_matched_trait_gets_its_own_reason_in_code_order():
         ("Highly Sensitive Skin (S)", "Sting"),
         ("Non-Pigmented Skin (N)", None),
     ]
+
+
+# --- Sources behind the explanation (migration 0009) ---------------------------
+
+def test_a_reason_carries_the_sources_of_its_concern():
+    """Returns the source rows linked to the concern that explains the trait,
+    skipping a link whose source row is missing."""
+    checked = {"id": "src-1", "title": "A checked source", "source_type": "safety_review"}
+    explained = concern("Extremely Dry Skin (D)", "High")
+    explained["concern_sources"] = [{"sources": checked}, {"sources": None}]
+    [reason] = _skin_type_reasons(ingredient("Extremely Dry Skin (D)", explained), "DSPT")
+    assert [s.title for s in reason.sources] == ["A checked source"]
+
+
+def test_a_reason_with_no_sourced_concern_has_no_sources():
+    """Returns an empty sources list when the concern has no sources, and when no
+    concern explains the trait at all."""
+    [with_concern] = _skin_type_reasons(
+        ingredient("Extremely Dry Skin (D)", concern("Extremely Dry Skin (D)", "High")), "DSPT")
+    [without] = _skin_type_reasons(ingredient("Extremely Dry Skin (D)"), "DSPT")
+    assert with_concern.sources == [] and without.sources == []

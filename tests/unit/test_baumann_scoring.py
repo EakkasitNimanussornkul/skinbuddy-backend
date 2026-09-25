@@ -164,6 +164,7 @@ def test_the_breakdown_carries_the_counts_behind_the_score():
     assert breakdown("OSPT", niacinamide, retinol, WATER, ing("Silica", "Oily Skin")) == {
         "helpful": 2, "concerns": 2, "concern_weight": 0.9,
         "considered": 3, "total_ingredients": 4, "limited": False,
+        "verified_considered": 0,
     }
 
 
@@ -245,3 +246,64 @@ def test_caution_reasons_name_each_concern_most_serious_first():
         "Alcohol: flagged for Extremely Dry Skin (D) (High)",
         "Caprylyl Glycol: Preservative Sensitivity (Low)",
     ]
+
+
+# --- Sources behind the counted ingredients (migration 0009) -------------------
+
+CHECKED = {"id": "src-1", "title": "A checked source", "source_type": "safety_review"}
+
+
+def sourced(claim, source=CHECKED):
+    return {"claim": claim, "sources": source}
+
+
+def with_sources(ingredient, *links):
+    return {**ingredient, "ingredient_sources": list(links)}
+
+
+def test_a_helpful_ingredient_is_verified_by_a_good_for_source():
+    """Returns verified_considered=1 for a helpful ingredient with a source
+    backing its good_for claim."""
+    glycerin = with_sources(GLYCERIN, sourced("good_for"))
+    assert breakdown("DSPT", glycerin)["verified_considered"] == 1
+
+
+def test_a_source_for_a_different_claim_does_not_verify():
+    """Returns verified_considered=0 for a helpful ingredient whose only source
+    backs its benefits, not the good_for claim the score counted: a source for
+    "glycerin is a humectant" is not a source for "glycerin suits dry skin"."""
+    glycerin = with_sources(GLYCERIN, sourced("benefits"), sourced("function"))
+    assert breakdown("DSPT", glycerin)["verified_considered"] == 0
+
+
+@pytest.mark.parametrize("via", ["bad_for source", "concern source"])
+def test_a_concern_is_verified_by_a_bad_for_source_or_its_concerns_source(via):
+    """Returns verified_considered=1 for a flagged ingredient backed either by a
+    bad_for source on the ingredient or by a source on the concern that graded
+    it."""
+    flagged = flagged_for_dry("Moderate")
+    if via == "bad_for source":
+        flagged = with_sources(flagged, sourced("bad_for"))
+    else:
+        flagged["ingredient_concerns"][0]["concern_sources"] = [{"sources": CHECKED}]
+    assert breakdown("DSPT", flagged)["verified_considered"] == 1
+
+
+def test_an_ingredient_counted_on_both_sides_needs_both_verified():
+    """Returns verified_considered=0 for niacinamide, helpful for oily skin and
+    flagged for sensitive skin, when only its good_for claim has a source, and 1
+    once its concern has one too."""
+    niacinamide = with_sources(
+        ing("Niacinamide", "Oily Skin", "Highly Sensitive Skin (S)",
+            concern("Highly Sensitive Skin (S)", "Moderate")),
+        sourced("good_for"))
+    assert breakdown("OSPT", niacinamide)["verified_considered"] == 0
+    niacinamide["ingredient_concerns"][0]["concern_sources"] = [{"sources": CHECKED}]
+    assert breakdown("OSPT", niacinamide)["verified_considered"] == 1
+
+
+def test_a_link_to_a_missing_source_row_does_not_verify():
+    """Returns verified_considered=0 when an ingredient's good_for link carries
+    no source row, as a join returns for a source that has been deleted."""
+    glycerin = with_sources(GLYCERIN, sourced("good_for", source=None))
+    assert breakdown("DSPT", glycerin)["verified_considered"] == 0

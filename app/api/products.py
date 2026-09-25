@@ -18,6 +18,17 @@ from app.core.utils import create_slug
 
 router = APIRouter()
 
+# Every product fetch here nests the same ingredient data: the concerns that
+# explain and grade skin-type flags, and the sources (migration 0009) behind
+# both an ingredient's stored claims and each concern. One definition, so the
+# routes cannot drift apart - a route missing ingredient_concerns once scored
+# the same product differently from the others.
+PRODUCT_INGREDIENTS_JOIN = (
+    "product_ingredients(ingredients(*, "
+    "ingredient_sources(claim, sources(*)), "
+    "ingredient_concerns(*, concern_sources(sources(*)))))"
+)
+
 def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
     """Shared per-product enrichment (score/reasons/safety_flags) used by search, slug, and detail endpoints."""
     ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
@@ -147,8 +158,10 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
     concern_count = 0
     concern_weight = 0.0
     considered = 0
+    verified_considered = 0
     for ing in ingredients:
         name = ing.get("name") or "An ingredient"
+        claims_sourced = {link.get("claim") for link in (ing.get("ingredient_sources") or []) if link.get("sources")}
         suited = _suited_traits(ing, user_skin_type)
         if suited:
             helpful_count += 1
@@ -164,6 +177,13 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
             cautions.append((weight, f"{name}: {label} ({worst.severity})"))
         if suited or reasons:
             considered += 1
+            # Verified on every side it counts: a good_for source for the side
+            # it helps; a bad_for source, or a source on the concern that
+            # graded it, for the side it counts against.
+            helpful_backed = not suited or "good_for" in claims_sourced
+            concern_backed = not reasons or "bad_for" in claims_sourced or bool(worst.sources)
+            if helpful_backed and concern_backed:
+                verified_considered += 1
 
     # The working, returned beside the score so the page can show it: "Based
     # on 9 of 23 ingredients: 7 suit your skin, 2 are a concern for it".
@@ -174,6 +194,7 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
         "considered": considered,
         "total_ingredients": len(ingredients),
         "limited": considered < LIMITED_EVIDENCE_BELOW,
+        "verified_considered": verified_considered,
     }
 
     # Nothing in the formula says anything about this skin type either way.
@@ -218,7 +239,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
         # its test asserted 404 and passed - the fake used to return None here
         # rather than raising. Same defect as BE-DEF-07, missed in that sweep
         # because this helper resolves the row rather than the handlers do.
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", clean_id).limit(1).execute()
+        res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("id", clean_id).limit(1).execute()
         if res.data:
             return res.data[0]
 
@@ -226,7 +247,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
     # full-catalog fetch-and-loop below). Falls through if the products.slug
     # column/migration hasn't been applied yet or no exact match is found.
     try:
-        slug_res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("slug", clean_id).limit(1).execute()
+        slug_res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("slug", clean_id).limit(1).execute()
         if slug_res.data:
             return slug_res.data[0]
     except Exception:
@@ -234,7 +255,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
 
     # 2. Check exact slug or normalized name matches across up to 2000 items
     clean_target = re.sub(r'[^a-z0-9]', '', clean_id)
-    res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").limit(2000).execute()
+    res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).limit(2000).execute()
     
     words = [w for w in clean_id.replace("-", " ").split() if len(w) > 2]
     
@@ -342,7 +363,7 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        query = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))")
+        query = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN)
         if q:
             clean_q = postgrest_quote(q.strip())
             query = query.or_(
@@ -479,7 +500,7 @@ async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(g
 
         # ingredient_concerns grades the concerns the match score weighs; every
         # other product fetch here already selects it.
-        res = supabase.table("products").select("*, product_ingredients(ingredients(*, ingredient_concerns(*)))").eq("id", product_id).limit(1).execute()
+        res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("id", product_id).limit(1).execute()
 
         if not res.data:
             raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")

@@ -77,6 +77,7 @@ def test_search_computes_a_skin_match_score_when_authenticated(client, patch_sup
     assert result["match_breakdown"] == {
         "helpful": 1, "concerns": 0, "concern_weight": 0.0,
         "considered": 1, "total_ingredients": 2, "limited": True,
+        "verified_considered": 0,   # no source linked to Glycerin
     }
 
 
@@ -537,6 +538,38 @@ def test_compare_reports_every_clash_with_product_b_as_one_conflict(client, patc
     [conflict] = conflicts
     assert conflict["conflicting_product"] == "Peptide Serum"
     assert len(conflict["details"]) == 3
+
+
+def test_compare_keeps_the_sources_nested_in_each_product(client, patch_supabase):
+    """Returns each compared product's source_url, its ingredients' sources and
+    its concerns' sources intact, rather than stripped by the response model,
+    which drops any field it does not declare."""
+    checked = {"id": "src-1", "title": "A checked source", "source_type": "safety_review",
+               "url": "https://example.org/checked"}
+    sourced_glycerin = {**GLYCERIN,
+                        "ingredient_sources": [{"claim": "good_for", "sources": checked}],
+                        "ingredient_concerns": [{"concern_title": "A concern", "target_profile": "Dry Skin (D)",
+                                                 "severity": "Low",
+                                                 "concern_sources": [{"sources": checked}]}]}
+    store = _compare_store([], [])
+    store["products"] = [
+        {**product(PROD_A_ID, "CeraVe", "Hydrating Lotion", "Moisturizer", [sourced_glycerin]),
+         "source_url": "https://world.openbeautyfacts.org/product/3606000537576"},
+        product(PROD_B_ID, "Brand B", "Toner", "Toner", [PHENOXY]),
+    ]
+    patch_supabase(store, "app.api.products", "app.core.services.compatibility_service")
+
+    body = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID}).json()
+
+    product_a = body["product_a"]
+    assert product_a["source_url"] == "https://world.openbeautyfacts.org/product/3606000537576"
+    ingredient = product_a["product_ingredients"][0]["ingredients"]
+    assert ingredient["ingredient_sources"] == [{"claim": "good_for", "sources": {
+        "id": "src-1", "title": "A checked source", "publisher": None, "url": "https://example.org/checked",
+        "source_type": "safety_review", "accessed_on": None, "notes": None}}]
+    assert ingredient["ingredient_concerns"][0]["concern_sources"][0]["sources"]["title"] == "A checked source"
+    assert body["product_b"]["source_url"] is None
 
 
 def test_compare_reports_an_internal_failure_as_a_400(client, patch_supabase, monkeypatch):
