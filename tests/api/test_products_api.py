@@ -49,6 +49,17 @@ def test_search_returns_enriched_products_anonymously(client, patch_supabase):
     assert results[0]["top_ingredients"] == ["Glycerin", "Phenoxyethanol"]
 
 
+def test_search_returns_each_products_own_sources(client, patch_supabase):
+    """Returns each product's product_sources - which source backs its
+    ingredient list, price, image or description - as they are stored."""
+    checked = {"id": "src-1", "title": "Brand page", "source_type": "product_database"}
+    patch_supabase({"products": [{**CLEANSER, "product_sources": [{"claim": "listing", "sources": checked}]}]},
+                   "app.api.products")
+
+    [result] = client.get("/products/search").json()
+    assert result["product_sources"] == [{"claim": "listing", "sources": checked}]
+
+
 def test_search_omits_personalisation_for_anonymous_callers(client, patch_supabase):
     """Returns skin_match_score=None, empty match reasons and has_conflict=False
     when no user is authenticated, since there is no skin type to score against."""
@@ -541,9 +552,9 @@ def test_compare_reports_every_clash_with_product_b_as_one_conflict(client, patc
 
 
 def test_compare_keeps_the_sources_nested_in_each_product(client, patch_supabase):
-    """Returns each compared product's source_url, its ingredients' sources and
-    its concerns' sources intact, rather than stripped by the response model,
-    which drops any field it does not declare."""
+    """Returns each compared product's source_url, its own product sources, its
+    ingredients' sources and its concerns' sources intact, rather than stripped
+    by the response model, which drops any field it does not declare."""
     checked = {"id": "src-1", "title": "A checked source", "source_type": "safety_review",
                "url": "https://example.org/checked"}
     sourced_glycerin = {**GLYCERIN,
@@ -554,7 +565,8 @@ def test_compare_keeps_the_sources_nested_in_each_product(client, patch_supabase
     store = _compare_store([], [])
     store["products"] = [
         {**product(PROD_A_ID, "CeraVe", "Hydrating Lotion", "Moisturizer", [sourced_glycerin]),
-         "source_url": "https://world.openbeautyfacts.org/product/3606000537576"},
+         "source_url": "https://world.openbeautyfacts.org/product/3606000537576",
+         "product_sources": [{"claim": "listing", "sources": checked}, {"claim": "price", "sources": checked}]},
         product(PROD_B_ID, "Brand B", "Toner", "Toner", [PHENOXY]),
     ]
     patch_supabase(store, "app.api.products", "app.core.services.compatibility_service")
@@ -564,6 +576,9 @@ def test_compare_keeps_the_sources_nested_in_each_product(client, patch_supabase
 
     product_a = body["product_a"]
     assert product_a["source_url"] == "https://world.openbeautyfacts.org/product/3606000537576"
+    assert [(ps["claim"], ps["sources"]["title"]) for ps in product_a["product_sources"]] == [
+        ("listing", "A checked source"), ("price", "A checked source")]
+    assert body["product_b"]["product_sources"] == []
     ingredient = product_a["product_ingredients"][0]["ingredients"]
     assert ingredient["ingredient_sources"] == [{"claim": "good_for", "sources": {
         "id": "src-1", "title": "A checked source", "publisher": None, "url": "https://example.org/checked",

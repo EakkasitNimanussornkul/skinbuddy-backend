@@ -61,6 +61,11 @@ class ConcernSourceLink(BaseModel):
     sources: Optional[SourceRef] = None
 
 
+class ProductSourceLink(BaseModel):
+    claim: str              # which product fact the source backs: listing | price | image | description
+    sources: Optional[SourceRef] = None
+
+
 class IngredientConcern(BaseModel):
     id: Optional[str] = None
     concern_title: Optional[str] = None
@@ -141,6 +146,7 @@ class MatchBreakdown(BaseModel):
 class ProductDetail(ProductResponse):
     description: Optional[str] = None
     source_url: Optional[str] = None   # the product's page in Open Beauty Facts, when that is where it came from
+    product_sources: List[ProductSourceLink] = []   # migration 0010
     price_thb: Optional[float] = None
     price_usd: Optional[float] = None
     product_ingredients: List[ProductIngredient] = []

@@ -29,6 +29,10 @@ PRODUCT_INGREDIENTS_JOIN = (
     "ingredient_concerns(*, concern_sources(sources(*)))))"
 )
 
+# A product row with its own sources (migration 0010: where its ingredient
+# list, price, image or description was seen) and its ingredients as above.
+PRODUCT_SELECT = "*, product_sources(claim, sources(*)), " + PRODUCT_INGREDIENTS_JOIN
+
 def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
     """Shared per-product enrichment (score/reasons/safety_flags) used by search, slug, and detail endpoints."""
     ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
@@ -239,7 +243,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
         # its test asserted 404 and passed - the fake used to return None here
         # rather than raising. Same defect as BE-DEF-07, missed in that sweep
         # because this helper resolves the row rather than the handlers do.
-        res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("id", clean_id).limit(1).execute()
+        res = supabase.table("products").select(PRODUCT_SELECT).eq("id", clean_id).limit(1).execute()
         if res.data:
             return res.data[0]
 
@@ -247,7 +251,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
     # full-catalog fetch-and-loop below). Falls through if the products.slug
     # column/migration hasn't been applied yet or no exact match is found.
     try:
-        slug_res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("slug", clean_id).limit(1).execute()
+        slug_res = supabase.table("products").select(PRODUCT_SELECT).eq("slug", clean_id).limit(1).execute()
         if slug_res.data:
             return slug_res.data[0]
     except Exception:
@@ -255,7 +259,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
 
     # 2. Check exact slug or normalized name matches across up to 2000 items
     clean_target = re.sub(r'[^a-z0-9]', '', clean_id)
-    res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).limit(2000).execute()
+    res = supabase.table("products").select(PRODUCT_SELECT).limit(2000).execute()
     
     words = [w for w in clean_id.replace("-", " ").split() if len(w) > 2]
     
@@ -363,7 +367,7 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        query = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN)
+        query = supabase.table("products").select(PRODUCT_SELECT)
         if q:
             clean_q = postgrest_quote(q.strip())
             query = query.or_(
@@ -500,7 +504,7 @@ async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(g
 
         # ingredient_concerns grades the concerns the match score weighs; every
         # other product fetch here already selects it.
-        res = supabase.table("products").select("*, " + PRODUCT_INGREDIENTS_JOIN).eq("id", product_id).limit(1).execute()
+        res = supabase.table("products").select(PRODUCT_SELECT).eq("id", product_id).limit(1).execute()
 
         if not res.data:
             raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
