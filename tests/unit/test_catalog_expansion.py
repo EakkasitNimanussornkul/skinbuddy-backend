@@ -165,6 +165,61 @@ def test_soft_problems_are_warnings_not_errors():
     assert "'Lonely Extract' is defined but" in joined
 
 
+# --- SQL -------------------------------------------------------------------------
+
+def test_every_insert_is_guarded_so_the_sql_can_run_twice():
+    """Returns SQL in one transaction whose every insert is guarded - by a not
+    exists check on the row's natural key, or on conflict do nothing on a
+    junction - and which contains no update or delete."""
+    sql = generate_sql(VALID, snapshot())
+    statements = [s for s in sql.split(";") if "insert into" in s]
+    assert statements
+    assert all("where not exists" in s or "on conflict do nothing" in s or "and not exists" in s for s in statements)
+    lowered = sql.lower()
+    assert "begin;" in lowered and "commit;" in lowered
+    assert "update public." not in lowered and "delete from" not in lowered
+
+
+def test_quotes_in_the_data_are_escaped():
+    """Returns SQL literals with single quotes doubled, so text like "Paula's
+    Choice" cannot end a string early."""
+    assert q("Paula's Choice") == "'Paula''s Choice'"
+    assert q(None) == "null" and q(17.5) == "17.5"
+    data = broken(("products", 0, "brand"), "Paula's Choice")
+    assert "'Paula''s Choice'" in generate_sql(data, snapshot())
+
+
+def test_product_sources_wait_for_migration_0010():
+    """Returns product-source inserts as live SQL when migration 0010 has run,
+    and only as comments, with an instruction to regenerate, when it has not."""
+    with_table = generate_sql(VALID, snapshot())
+    without = generate_sql(VALID, snapshot(has_product_sources=False))
+    assert "\ninsert into public.product_sources" in with_table
+    assert "\ninsert into public.product_sources" not in without
+    assert "-- insert into public.product_sources" in without
+    assert "Run 0010, then regenerate" in without
+
+
+def test_images_are_listed_for_the_separate_images_step():
+    """Returns each product's Open Beauty Facts image as a comment naming the
+    images command, since SQL cannot fetch an image."""
+    sql = generate_sql(VALID, snapshot())
+    assert "python -m app.db.catalog_expansion images" in sql
+    assert "https://images.openbeautyfacts.org/images/products/1/front.jpg" in sql
+
+
+def test_a_pair_listed_twice_in_opposite_orders_is_rejected():
+    """Returns an error for the second of two rules in one file that name the
+    same ingredient pair in opposite orders, since a rule's pair has no order."""
+    data = copy.deepcopy(VALID)
+    data["conflict_rules"].append({"ingredient_a": "Salicylic Acid", "ingredient_b": "Zinc Oxide Test",
+                                   "severity": "low", "warning_message": "Again.", "sources": []})
+    assert any("conflict_rules[1]" in e and "already exists (in either order)" in e for e in errors_for(data))
+
+
+# --- Ingredient use --------------------------------------------------------------
+# Kept last so the Test Record's existing UTC-65 case numbers do not shift.
+
 def with_unlisted_citral(concern, rule):
     """VALID plus a new ingredient, Citral, that no product lists, optionally
     named by a concern and/or a conflict rule."""
@@ -238,55 +293,3 @@ def test_sql_is_still_generated_when_the_only_problems_are_warnings(tmp_path, mo
     assert catalog_expansion.main(["sql", str(source), "--out", str(out)]) == 0
     assert any("WARNING  ingredients: 'Citral' is in no product" in line for line in printed)
     assert "select 'Citral'" in out.read_text(encoding="utf-8")
-
-
-# --- SQL -------------------------------------------------------------------------
-
-def test_every_insert_is_guarded_so_the_sql_can_run_twice():
-    """Returns SQL in one transaction whose every insert is guarded - by a not
-    exists check on the row's natural key, or on conflict do nothing on a
-    junction - and which contains no update or delete."""
-    sql = generate_sql(VALID, snapshot())
-    statements = [s for s in sql.split(";") if "insert into" in s]
-    assert statements
-    assert all("where not exists" in s or "on conflict do nothing" in s or "and not exists" in s for s in statements)
-    lowered = sql.lower()
-    assert "begin;" in lowered and "commit;" in lowered
-    assert "update public." not in lowered and "delete from" not in lowered
-
-
-def test_quotes_in_the_data_are_escaped():
-    """Returns SQL literals with single quotes doubled, so text like "Paula's
-    Choice" cannot end a string early."""
-    assert q("Paula's Choice") == "'Paula''s Choice'"
-    assert q(None) == "null" and q(17.5) == "17.5"
-    data = broken(("products", 0, "brand"), "Paula's Choice")
-    assert "'Paula''s Choice'" in generate_sql(data, snapshot())
-
-
-def test_product_sources_wait_for_migration_0010():
-    """Returns product-source inserts as live SQL when migration 0010 has run,
-    and only as comments, with an instruction to regenerate, when it has not."""
-    with_table = generate_sql(VALID, snapshot())
-    without = generate_sql(VALID, snapshot(has_product_sources=False))
-    assert "\ninsert into public.product_sources" in with_table
-    assert "\ninsert into public.product_sources" not in without
-    assert "-- insert into public.product_sources" in without
-    assert "Run 0010, then regenerate" in without
-
-
-def test_images_are_listed_for_the_separate_images_step():
-    """Returns each product's Open Beauty Facts image as a comment naming the
-    images command, since SQL cannot fetch an image."""
-    sql = generate_sql(VALID, snapshot())
-    assert "python -m app.db.catalog_expansion images" in sql
-    assert "https://images.openbeautyfacts.org/images/products/1/front.jpg" in sql
-
-
-def test_a_pair_listed_twice_in_opposite_orders_is_rejected():
-    """Returns an error for the second of two rules in one file that name the
-    same ingredient pair in opposite orders, since a rule's pair has no order."""
-    data = copy.deepcopy(VALID)
-    data["conflict_rules"].append({"ingredient_a": "Salicylic Acid", "ingredient_b": "Zinc Oxide Test",
-                                   "severity": "low", "warning_message": "Again.", "sources": []})
-    assert any("conflict_rules[1]" in e and "already exists (in either order)" in e for e in errors_for(data))
