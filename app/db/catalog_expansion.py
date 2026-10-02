@@ -215,7 +215,9 @@ def validate(data: Any, snap: Snapshot) -> Report:
 
     # Products -----------------------------------------------------------------
     products_seen: Set[Tuple[str, str]] = set()
-    referenced: Set[str] = set()
+    in_products: Set[str] = set()       # listed by a product: the only way users ever see an ingredient
+    in_concerns: Set[str] = set()
+    in_rules: Set[str] = set()
     for i, p in enumerate(data.get("products", [])):
         where = f"products[{i}]"
         brand, name = p.get("brand"), p.get("name")
@@ -252,7 +254,7 @@ def validate(data: Any, snap: Snapshot) -> Report:
                 report.error(where, f"lists {sorted(dupes)} more than once")
             for n in ingredients:
                 if ingredient_ref(f"{where}.ingredients", n):
-                    referenced.add(n)
+                    in_products.add(n)
         _check_claim_sources(report, f"{where}.sources", p.get("sources"), PRODUCT_CLAIMS, keys, used)
         sources = p.get("sources") or {}
         if (p.get("price_thb") is not None or p.get("price_usd") is not None) and not sources.get("price"):
@@ -269,7 +271,7 @@ def validate(data: Any, snap: Snapshot) -> Report:
         name = c.get("ingredient")
         if not ingredient_ref(where, name):
             continue
-        referenced.add(name)
+        in_concerns.add(name)
         where = f"{where} ({name})"
         profile = c.get("target_profile")
         if not _text(profile):
@@ -297,7 +299,7 @@ def validate(data: Any, snap: Snapshot) -> Report:
         ok = ingredient_ref(where, a) & ingredient_ref(where, b)
         if not ok:
             continue
-        referenced.update((a, b))
+        in_rules.update((a, b))
         where = f"{where} ({a} + {b})"
         if a == b:
             report.error(where, "a rule needs two different ingredients")
@@ -334,8 +336,16 @@ def validate(data: Any, snap: Snapshot) -> Report:
 
     for key in sorted(keys - used):
         report.warn("sources", f"{key} is not referenced by anything")
-    for name in sorted(set(new_ingredients) - referenced):
-        report.warn("ingredients", f"{name!r} is defined but no product, concern or rule uses it")
+    # A new ingredient reaches users only through a product's list; a concern or
+    # rule on it alone is never shown. Live ingredients are left alone: adding a
+    # concern or rule to one is normal.
+    for name in sorted(set(new_ingredients) - in_products):
+        users = [label for label, names in (("concern(s)", in_concerns), ("rule(s)", in_rules)) if name in names]
+        if users:
+            report.warn("ingredients", f"{name!r} is in no product; only its {' and '.join(users)} "
+                                       "use it, so users will never see it")
+        else:
+            report.warn("ingredients", f"{name!r} is defined but no product, concern or rule uses it")
     return report
 
 

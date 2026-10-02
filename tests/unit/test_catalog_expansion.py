@@ -165,6 +165,81 @@ def test_soft_problems_are_warnings_not_errors():
     assert "'Lonely Extract' is defined but" in joined
 
 
+def with_unlisted_citral(concern, rule):
+    """VALID plus a new ingredient, Citral, that no product lists, optionally
+    named by a concern and/or a conflict rule."""
+    data = copy.deepcopy(VALID)
+    data["ingredients"].append({"name": "Citral", "functional_group": "Solvent", "awareness_tier": "low",
+                                "benefits": "Fragrance.", "good_for": "", "bad_for": "Highly Sensitive Skin (S)"})
+    if concern:
+        data["concerns"].append({"ingredient": "Citral", "concern_title": "Fragrance allergen",
+                                 "concern_description": "Can sensitise reactive skin.",
+                                 "target_profile": "Highly Sensitive Skin (S)", "severity": "Moderate", "sources": []})
+    if rule:
+        data["conflict_rules"].append({"ingredient_a": "Citral", "ingredient_b": "Water", "severity": "low",
+                                       "warning_message": "Test rule.", "sources": []})
+    return data
+
+
+@pytest.mark.parametrize("concern, rule, expected", [
+    (True, False, "ingredients: 'Citral' is in no product; only its concern(s) use it, so users will never see it"),
+    (False, True, "ingredients: 'Citral' is in no product; only its rule(s) use it, so users will never see it"),
+    (True, True, "ingredients: 'Citral' is in no product; only its concern(s) and rule(s) use it, so users will never see it"),
+    (False, False, "ingredients: 'Citral' is defined but no product, concern or rule uses it"),
+])
+def test_a_new_ingredient_in_no_product_is_warned_even_if_a_concern_or_rule_names_it(concern, rule, expected):
+    """Returns exactly one warning, and no error, for a new ingredient that no
+    product lists: when a concern and/or a rule names it, the warning says it is
+    in no product, names the concern(s) and/or rule(s) that use it, and says users
+    will never see it; when nothing names it, the warning is the unchanged
+    "is defined but no product, concern or rule uses it"."""
+    report = validate(with_unlisted_citral(concern, rule), snapshot())
+    assert report.errors == []
+    assert [w for w in report.warnings if "'Citral'" in w] == [expected]
+
+
+def test_a_new_ingredient_a_product_lists_gets_no_use_warning():
+    """Returns no warning about use for a new ingredient that a product lists,
+    even when a concern and a rule also name it."""
+    report = validate(VALID, snapshot())
+    assert not [w for w in report.warnings if "Zinc Oxide Test" in w], report.warnings
+
+
+def test_concerns_and_rules_on_live_ingredients_get_no_use_warning():
+    """Returns no warning for a live ingredient that no product in the file lists
+    but a new concern and a new rule name, since adding a concern or a rule to a
+    live ingredient is normal."""
+    data = copy.deepcopy(VALID)
+    data["concerns"].append({"ingredient": "Live Extract", "concern_title": "t", "concern_description": "d",
+                             "target_profile": "Highly Sensitive Skin (S)", "severity": "Low", "sources": []})
+    data["conflict_rules"].append({"ingredient_a": "Live Extract", "ingredient_b": "Water", "severity": "low",
+                                   "warning_message": "Test rule.", "sources": []})
+    snap = snapshot()
+    snap.ingredients["Live Extract"] = 1
+    snap.ingredient_bad_for["Live Extract"] = "Highly Sensitive Skin (S)"
+    report = validate(data, snap)
+    assert report.errors == []
+    assert not [w for w in report.warnings if "Live Extract" in w], report.warnings
+
+
+def test_sql_is_still_generated_when_the_only_problems_are_warnings(tmp_path, monkeypatch):
+    """Returns exit code 0 from the sql command, prints the in-no-product warning,
+    and writes the SQL file, including the new ingredient, when the file's only
+    problems are warnings."""
+    import json
+    from app.db import catalog_expansion
+
+    monkeypatch.setattr(catalog_expansion, "read_snapshot", lambda: snapshot())
+    source = tmp_path / "expansion.json"
+    source.write_text(json.dumps(with_unlisted_citral(concern=True, rule=False)), encoding="utf-8")
+    out = tmp_path / "out.sql"
+    printed = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a))))
+    assert catalog_expansion.main(["sql", str(source), "--out", str(out)]) == 0
+    assert any("WARNING  ingredients: 'Citral' is in no product" in line for line in printed)
+    assert "select 'Citral'" in out.read_text(encoding="utf-8")
+
+
 # --- SQL -------------------------------------------------------------------------
 
 def test_every_insert_is_guarded_so_the_sql_can_run_twice():
