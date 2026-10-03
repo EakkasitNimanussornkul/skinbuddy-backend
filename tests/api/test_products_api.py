@@ -884,3 +884,79 @@ def test_internal_errors_are_not_leaked_to_clients(client, monkeypatch):
     assert resp.status_code == 500
     assert "hunter2" not in resp.text
     assert resp.json()["detail"] == "Failed to search products."
+
+
+# --- Expired or invalid login on the optional-auth routes --------------------
+#
+# These send a real Authorization header with no dependency override, so the
+# real get_optional_user_id runs. Before the fix an expired token was treated as
+# a guest: every % Match showed "unavailable" and nothing prompted a re-login.
+
+def _expired_token_header():
+    import jwt
+    from datetime import datetime, timedelta
+    from app.config.setting import settings
+
+    past = datetime.utcnow() - timedelta(days=1)
+    token = jwt.encode({"sub": "user-1", "aud": "authenticated", "exp": int(past.timestamp())},
+                       settings.SUPABASE_JWT_SECRET, algorithm="HS256")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_search_rejects_an_expired_login_with_401(client, patch_supabase):
+    """Returns HTTP 401 with detail "Token expired" for GET /products/search
+    called with an expired bearer token, rather than guest results with no
+    % Match."""
+    patch_supabase({"products": [CLEANSER], "users": [{"id": "user-1", "skin_type": "DSPT"}]},
+                   "app.api.products")
+
+    resp = client.get("/products/search", headers=_expired_token_header())
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Token expired"
+
+
+def test_search_rejects_a_forged_login_with_401(client, patch_supabase):
+    """Returns HTTP 401 with detail "Invalid token" for GET /products/search
+    called with a bearer value that fails verification, rather than guest
+    results."""
+    patch_supabase({"products": [CLEANSER]}, "app.api.products")
+
+    resp = client.get("/products/search", headers={"Authorization": "Bearer not-a-real-jwt"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid token"
+
+
+def test_slug_rejects_an_expired_login_with_401(client, patch_supabase):
+    """Returns HTTP 401 with detail "Token expired" for GET /products/slug/{slug}
+    called with an expired bearer token; the route's generic error handler does
+    not turn it into a 500."""
+    patch_supabase({"products": [CLEANSER], "users": [{"id": "user-1", "skin_type": "DSPT"}]},
+                   "app.api.products")
+
+    resp = client.get("/products/slug/cerave-hydrating-facial-cleanser",
+                      headers=_expired_token_header())
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Token expired"
+
+
+def test_compare_rejects_an_expired_login_with_401(client, conflicting_catalog):
+    """Returns HTTP 401 with detail "Token expired" for GET /products/compare
+    called with an expired bearer token; the route's generic error handler does
+    not turn it into a 400."""
+    resp = client.get("/products/compare",
+                      params={"product_a_id": PROD_A_ID, "product_b_id": PROD_B_ID},
+                      headers=_expired_token_header())
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Token expired"
+
+
+def test_product_detail_rejects_an_expired_login_with_401(client, patch_supabase):
+    """Returns HTTP 401 with detail "Token expired" for GET /products/{product_id}
+    called with an expired bearer token, rather than the product without a
+    % Match."""
+    patch_supabase({"products": [CLEANSER], "users": [{"id": "user-1", "skin_type": "DSPT"}]},
+                   "app.api.products")
+
+    resp = client.get(f"/products/{PROD_A_ID}", headers=_expired_token_header())
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Token expired"

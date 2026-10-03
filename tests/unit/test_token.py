@@ -109,14 +109,61 @@ def test_token_with_wrong_audience_is_rejected():
 # --- Optional (anonymous-tolerant) variant -----------------------------------
 
 def test_optional_returns_none_when_unauthenticated():
+    """Returns None, the anonymous guest, when no Authorization header is sent,
+    so public product pages keep working without a login."""
     assert get_optional_user_id(None) is None
 
 
-def test_optional_returns_none_instead_of_raising_on_a_bad_token():
-    """Public endpoints degrade to anonymous rather than 401-ing."""
-    assert get_optional_user_id(bearer("not-a-jwt")) is None
+def test_optional_rejects_a_malformed_token_with_401():
+    """Raises HTTP 401 with detail "Invalid token" for a bearer value that is not
+    a JWT, rather than treating the caller as an anonymous guest."""
+    with pytest.raises(HTTPException) as exc:
+        get_optional_user_id(bearer("not-a-jwt"))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Invalid token"
+
+
+def test_optional_rejects_an_expired_token_with_401():
+    """Raises HTTP 401 with detail "Token expired" for a correctly signed token
+    whose exp is in the past, so an expired login prompts a re-login instead of
+    silently showing guest results."""
+    past = datetime.utcnow() - timedelta(days=1)
+    expired = encode({"sub": USER_ID, "aud": "authenticated", "exp": int(past.timestamp())})
+    with pytest.raises(HTTPException) as exc:
+        get_optional_user_id(bearer(expired))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Token expired"
+
+
+def test_optional_rejects_a_token_signed_with_the_wrong_secret_with_401():
+    """Raises HTTP 401 with detail "Invalid token" for an unexpired token signed
+    with a different secret."""
+    forged = jwt.encode(
+        {"sub": "attacker", "aud": "authenticated",
+         "exp": int((datetime.utcnow() + timedelta(days=1)).timestamp())},
+        "a-different-secret-long-enough-to-avoid-a-key-length-warning",
+        algorithm="HS256",
+    )
+    with pytest.raises(HTTPException) as exc:
+        get_optional_user_id(bearer(forged))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Invalid token"
+
+
+def test_optional_rejects_a_token_with_the_wrong_audience_with_401():
+    """Raises HTTP 401 with detail "Invalid token" for a correctly signed,
+    unexpired token whose audience is not "authenticated"."""
+    wrong_aud = encode({
+        "sub": USER_ID, "aud": "anon",
+        "exp": int((datetime.utcnow() + timedelta(days=1)).timestamp()),
+    })
+    with pytest.raises(HTTPException) as exc:
+        get_optional_user_id(bearer(wrong_aud))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Invalid token"
 
 
 def test_optional_returns_the_user_id_for_a_valid_token():
+    """Returns the token's sub claim as the user id for a valid, unexpired token."""
     token = create_supabase_compatible_token(USER_ID)
     assert get_optional_user_id(bearer(token)) == USER_ID

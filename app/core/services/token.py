@@ -40,15 +40,13 @@ def get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials] = De
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_optional_user_id(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[str]:
+    # No Authorization header at all: an anonymous guest, which public product
+    # pages must keep serving.
     if not credentials:
         return None
-    try:
-        payload = jwt.decode(
-            credentials.credentials,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated"
-        )
-        return payload.get("sub")
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        return None  # Fallback to anonymous guest state gracefully
+    # A header that is present but expired or invalid is a broken session, not a
+    # guest. Treating it as a guest hid an expired login: every % Match showed
+    # "unavailable" and nothing prompted a re-login. Delegating gives the same
+    # 401 and detail text ("Token expired" / "Invalid token") as protected routes,
+    # which the frontend's 401 interceptor turns into a login prompt.
+    return get_current_user_id(credentials)
