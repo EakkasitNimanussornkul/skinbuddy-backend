@@ -841,3 +841,121 @@ def test_update_with_invalid_input_is_refused(db, patch, code):
 def test_update_of_a_missing_product_is_refused(db):
     """A PATCH for a product id that does not exist fails with SBNFD."""
     assert update(db, "22222222-0000-0000-0000-00000000dead", "2026-01-01T00:00:00+00:00", {}).sqlstate == "SBNFD"
+
+
+
+# --- product_ingredients.position (pack order) -----------------------------------------
+# Appended at the end so earlier Test Record case numbers do not shift.
+
+def positions(db, product_id):
+    """The product's links as [ingredient_id, position] pairs, in position order."""
+    return scalar(db, "select coalesce(jsonb_agg(jsonb_build_array(ingredient_id, position) "
+                      "order by position nulls last, ctid), '[]') "
+                      f"from public.product_ingredients where product_id = '{product_id}';")
+
+
+def test_migration_adds_position_once_with_its_check_and_unique_index(pg):
+    """After 0013 has run twice, product_ingredients has one nullable integer position
+    column, one position >= 0 check and one unique index on (product_id, position)."""
+    column = rows(pg, "select data_type, is_nullable from information_schema.columns where table_schema = 'public' "
+                      "and table_name = 'product_ingredients' and column_name = 'position'")
+    assert column == [{"data_type": "integer", "is_nullable": "YES"}]
+    assert scalar(pg, "select count(*) from pg_constraint where conname = 'product_ingredients_position_check';") == 1
+    assert scalar(pg, "select count(*) from pg_indexes where indexname = 'product_ingredients_product_position_key';") == 1
+
+
+def test_links_that_exist_before_the_migration_keep_a_null_position(pg):
+    """Ingredient links that exist when 0013 runs keep position NULL after it runs, and
+    after it runs a second time: there is no backfill."""
+    pg.create_database("skinbuddy_positions")
+    pg.check("insert into public.products (id, brand, name, category, slug) values "
+             f"('{SNAIL}', 'COSRX', 'Snail', 'Treatments', 'cosrx-snail');"
+             f"insert into public.ingredients (id, name, benefits) values ('{WATER}', 'Water', 'b'), ('{GLYCERIN}', 'Glycerin', 'b');"
+             f"insert into public.product_ingredients (product_id, ingredient_id) values ('{SNAIL}', '{WATER}'), ('{SNAIL}', '{GLYCERIN}');",
+             db="skinbuddy_positions")
+    for _ in range(2):
+        assert pg.run_file(MIGRATION_0013, db="skinbuddy_positions").ok
+        assert pg.check("select count(*) from public.product_ingredients where position is null;",
+                        db="skinbuddy_positions").json() == 2
+    pg.check("drop database skinbuddy_positions;", db="postgres")
+
+
+def test_approve_numbers_positions_in_pack_order_with_no_gaps(db):
+    """approve writes position 0, 1, 2, 3 to the linked ingredients in pack order: a
+    dropped ingredient and a repeat of one already linked (a known id listed twice, or
+    a new name that resolves to a linked row) take no number, so there are no gaps."""
+    sid = submit(db, payload(ingredients=[
+        {"ingredient_id": WATER},
+        {"new_name": "Dropped Thing"},
+        {"ingredient_id": NIACINAMIDE},
+        {"ingredient_id": WATER},
+        {"new_name": "aqua"},
+        {"new_name": "Glycerol"},
+        {"new_name": "Tremella"},
+    ]))
+    result = approve(db, sid, {"new_ingredients": [
+        {"position": 1, "decision": "drop"},
+        {"position": 4, "decision": "name_only"},
+        {"position": 5, "decision": "name_only"},
+        {"position": 6, "decision": "with_details", "functional_group": "Humectant"},
+    ]})
+    assert result.ok, result.stderr
+    tremella = scalar(db, "select to_jsonb(id) from public.ingredients where name = 'Tremella';")
+    assert positions(db, result.json()["product_id"]) == [
+        [WATER, 0], [NIACINAMIDE, 1], [GLYCERIN, 2], [tremella, 3]]
+
+
+def test_update_rewrites_positions_in_the_new_order(db):
+    """A PATCH that replaces the ingredient list numbers the new links 0, 1, 2 in the
+    order given, skipping a repeat; a second PATCH with the order reversed renumbers
+    them in the reversed order."""
+    result = update(db, SNAIL, updated_at_of(db, SNAIL), {"ingredients": [
+        {"ingredient_id": GLYCERIN}, {"new_name": "aqua"}, {"ingredient_id": NIACINAMIDE}, {"ingredient_id": GLYCERIN}]})
+    assert result.ok, result.stderr
+    assert positions(db, SNAIL) == [[GLYCERIN, 0], [WATER, 1], [NIACINAMIDE, 2]]
+    result = update(db, SNAIL, result.json()["updated_at"], {"ingredients": [
+        {"ingredient_id": NIACINAMIDE}, {"ingredient_id": WATER}, {"ingredient_id": GLYCERIN}]})
+    assert result.ok, result.stderr
+    assert positions(db, SNAIL) == [[NIACINAMIDE, 0], [WATER, 1], [GLYCERIN, 2]]
+
+
+def test_update_without_an_ingredient_list_leaves_positions_alone(db):
+    """A PATCH without "ingredients" leaves every link and its position (NULL for the
+    seeded rows) as it was."""
+    before = positions(db, SNAIL)
+    assert update(db, SNAIL, updated_at_of(db, SNAIL), {"price_thb": 700}).ok
+    assert positions(db, SNAIL) == before == [[WATER, None], [GLYCERIN, None]]
+
+
+def test_two_links_cannot_share_a_position_and_a_position_cannot_be_negative(db):
+    """A second link at a position the product already uses fails with unique_violation
+    (23505), and a negative position fails with check_violation (23514)."""
+    db.check(f"update public.product_ingredients set position = 0 where product_id = '{SNAIL}' and ingredient_id = '{WATER}';")
+    clash = db.run(f"update public.product_ingredients set position = 0 where product_id = '{SNAIL}' and ingredient_id = '{GLYCERIN}';")
+    assert clash.sqlstate == "23505"
+    negative = db.run(f"update public.product_ingredients set position = -1 where product_id = '{SNAIL}' and ingredient_id = '{GLYCERIN}';")
+    assert negative.sqlstate == "23514"
+
+
+def test_catalogue_expansion_sql_stores_label_positions_and_reruns_cleanly(db):
+    """SQL generated by the catalogue-expansion loader, once 0013 has run, links the new
+    product's ingredients at positions 0..3 in label order (including a new ingredient
+    defined in the same file); running the same SQL a second time changes nothing."""
+    from app.db.catalog_expansion import Snapshot, generate_sql
+
+    data = {
+        "sources": [], "concerns": [], "conflict_rules": [], "category_rules": [],
+        "ingredients": [{"name": "Zinc Test", "functional_group": "Vitamin B3", "awareness_tier": "low",
+                         "benefits": "Regulates sebum.", "good_for": "Oily Skin", "bad_for": "None"}],
+        "products": [{"brand": "Loader Brand", "name": "Label Order Serum", "category": "Treatments",
+                      "description": "A serum.", "price_thb": 590, "price_usd": 17.5, "source_url": None,
+                      "ingredients": ["Glycerin", "Zinc Test", "Water", "Niacinamide"]}],
+    }
+    sql = generate_sql(data, Snapshot(has_product_sources=True, has_ingredient_positions=True))
+    assert db.run(sql).ok
+    product = scalar(db, "select to_jsonb(id) from public.products where name = 'Label Order Serum';")
+    zinc = scalar(db, "select to_jsonb(id) from public.ingredients where name = 'Zinc Test';")
+    assert positions(db, product) == [[GLYCERIN, 0], [zinc, 1], [WATER, 2], [NIACINAMIDE, 3]]
+    before = snapshot(db)
+    assert db.run(sql).ok
+    assert snapshot(db) == before

@@ -293,3 +293,37 @@ def test_sql_is_still_generated_when_the_only_problems_are_warnings(tmp_path, mo
     assert catalog_expansion.main(["sql", str(source), "--out", str(out)]) == 0
     assert any("WARNING  ingredients: 'Citral' is in no product" in line for line in printed)
     assert "select 'Citral'" in out.read_text(encoding="utf-8")
+
+
+# --- Ingredient positions (migration 0013) ---------------------------------------
+# Appended at the end so the Test Record's case numbers above do not shift.
+
+def _ingredient_link_statements(sql):
+    return [s for s in sql.split(";") if "insert into public.product_ingredients" in s]
+
+
+def test_ingredient_links_carry_their_label_position_after_migration_0013():
+    """Returns one guarded product_ingredients insert per listed ingredient, each
+    writing position 0, 1, 2, 3 in the product's label order (Water, Glycerin, Zinc
+    Oxide Test, Salicylic Acid), and a header naming migration 0013, when 0013 has run."""
+    sql = generate_sql(VALID, snapshot(has_ingredient_positions=True))
+    links = _ingredient_link_statements(sql)
+    assert len(links) == 4
+    for position, (name, stmt) in enumerate(zip(VALID["products"][0]["ingredients"], links)):
+        assert "(product_id, ingredient_id, position)" in stmt
+        assert f"select p.id, i.id, {position} from" in stmt
+        assert f"i.name = {q(name)}" in stmt
+        assert "and not exists (select 1 from public.product_ingredients pi" in stmt
+    assert "Requires migrations 0009 and 0010 and 0013." in sql
+
+
+def test_ingredient_links_have_no_position_before_migration_0013():
+    """Returns product_ingredients inserts without a position column, and a comment
+    saying label order is not stored, when migration 0013 has not run, so the file
+    still runs on a database without the column."""
+    sql = generate_sql(VALID, snapshot())
+    links = _ingredient_link_statements(sql)
+    assert len(links) == 4
+    assert all("(product_id, ingredient_id)\n" in s and "position" not in s for s in links)
+    assert "label order is not stored: migration 0013" in sql
+    assert "and 0013" not in sql
