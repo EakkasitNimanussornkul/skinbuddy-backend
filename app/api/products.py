@@ -1,9 +1,13 @@
 import re
+import uuid
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from postgrest.exceptions import APIError
 from app.db.connection import supabase
-from app.core.services.token import get_current_user_id, get_optional_user_id
-from app.schemas import ProductDetail, CompareResponse, SharedIngredient, BAUMANN_PATTERN
+from app.core.services.token import get_admin_user_id, get_current_user_id, get_optional_user_id
+from app.core.services import image_upload
+from app.core.services.rpc_errors import http_error_for_rpc
+from app.schemas import ProductDetail, CompareResponse, SharedIngredient, BAUMANN_PATTERN, ProductPatch
 from app.core.services.ingredientcheck_service import calculate_safety_flags  # 🌟 ADDED IMPORT
 from app.core.services import compatibility_service
 # compute_ingredient_similarity now lives in compatibility_service.py, not
@@ -32,6 +36,20 @@ PRODUCT_INGREDIENTS_JOIN = (
 # A product row with its own sources (migration 0010: where its ingredient
 # list, price, image or description was seen) and its ingredients as above.
 PRODUCT_SELECT = "*, product_sources(claim, sources(*)), " + PRODUCT_INGREDIENTS_JOIN
+
+# Ingredients come back in the order printed on the pack (migration 0013's
+# product_ingredients.position), with NULLs last. PostgREST orders an embedded
+# resource through a query parameter (<embed>.order=position.asc.nullslast),
+# not inside the select string, so every query that uses the join above goes
+# through this helper. Products added before 0013 have NULL positions, so their
+# order stays unspecified, as it always was.
+INGREDIENT_ORDER_COLUMN = "position"
+
+
+def in_pack_order(query, embed: str = "product_ingredients"):
+    """Order the query's embedded product_ingredients rows by pack position.
+    `embed` is the path to them: "products.product_ingredients" from shelf_items."""
+    return query.order(INGREDIENT_ORDER_COLUMN, foreign_table=embed, nullsfirst=False)
 
 def compute_product_display_fields(prod: dict, user_skin_type: str) -> dict:
     """Shared per-product enrichment (score/reasons/safety_flags) used by search, slug, and detail endpoints."""
@@ -243,7 +261,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
         # its test asserted 404 and passed - the fake used to return None here
         # rather than raising. Same defect as BE-DEF-07, missed in that sweep
         # because this helper resolves the row rather than the handlers do.
-        res = supabase.table("products").select(PRODUCT_SELECT).eq("id", clean_id).limit(1).execute()
+        res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).eq("id", clean_id).limit(1).execute()
         if res.data:
             return res.data[0]
 
@@ -251,7 +269,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
     # full-catalog fetch-and-loop below). Falls through if the products.slug
     # column/migration hasn't been applied yet or no exact match is found.
     try:
-        slug_res = supabase.table("products").select(PRODUCT_SELECT).eq("slug", clean_id).limit(1).execute()
+        slug_res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).eq("slug", clean_id).limit(1).execute()
         if slug_res.data:
             return slug_res.data[0]
     except Exception:
@@ -259,7 +277,7 @@ async def resolve_product_record(identifier: str) -> dict or None:
 
     # 2. Check exact slug or normalized name matches across up to 2000 items
     clean_target = re.sub(r'[^a-z0-9]', '', clean_id)
-    res = supabase.table("products").select(PRODUCT_SELECT).limit(2000).execute()
+    res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).limit(2000).execute()
     
     words = [w for w in clean_id.replace("-", " ").split() if len(w) > 2]
     
@@ -367,7 +385,7 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        query = supabase.table("products").select(PRODUCT_SELECT)
+        query = in_pack_order(supabase.table("products").select(PRODUCT_SELECT))
         if q:
             clean_q = postgrest_quote(q.strip())
             query = query.or_(
@@ -488,29 +506,37 @@ async def compare_two_products(
         print("GET /products/compare error:", e)
         raise HTTPException(status_code=400, detail="Failed to compare products.")
 
+def load_product_detail(product_id: str, user_id: Optional[str]) -> Optional[dict]:
+    """GET /products/{id}'s body, or None when no product has this id. PATCH
+    /products/{id} answers with the same shape."""
+    # .limit(1) rather than .single(): the real client's .single() RAISES on
+    # zero rows (PGRST116), which the generic handler turned into a 500 for a
+    # product that simply does not exist. The sibling resolvers
+    # (get_product_by_slug, compare_two_products) already read a list for the
+    # same reason. BE-DEF-07.
+    user_skin_type = ""
+    if user_id:
+        user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
+        if user_res.data:
+            user_skin_type = user_res.data[0].get("skin_type") or ""
+
+    # ingredient_concerns grades the concerns the match score weighs; every
+    # other product fetch here already selects it.
+    res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).eq("id", product_id).limit(1).execute()
+    if not res.data:
+        return None
+
+    data = res.data[0]
+    data.update(compute_product_display_fields(data, user_skin_type))
+    return data
+
+
 @router.get("/{product_id}")
 async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(get_optional_user_id)):
     try:
-        # .limit(1) rather than .single(): the real client's .single() RAISES on
-        # zero rows (PGRST116), which the generic handler below turned into a 500
-        # for a product that simply does not exist. The sibling resolvers
-        # (get_product_by_slug, compare_two_products) already read a list for the
-        # same reason. BE-DEF-07.
-        user_skin_type = ""
-        if user_id:
-            user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
-            if user_res.data:
-                user_skin_type = user_res.data[0].get("skin_type") or ""
-
-        # ingredient_concerns grades the concerns the match score weighs; every
-        # other product fetch here already selects it.
-        res = supabase.table("products").select(PRODUCT_SELECT).eq("id", product_id).limit(1).execute()
-
-        if not res.data:
+        data = load_product_detail(product_id, user_id)
+        if data is None:
             raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
-
-        data = res.data[0]
-        data.update(compute_product_display_fields(data, user_skin_type))
         return data
     except HTTPException:
         # Ahead of the generic clause below, which catches HTTPException too and
@@ -519,3 +545,65 @@ async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(g
     except Exception as e:
         print("GET /products/{id} error:", e)
         raise HTTPException(status_code=500, detail="Failed to fetch product.")
+
+
+def _require_product_uuid(product_id: str) -> str:
+    """A malformed id is a 404, not a Postgres type error answered as 500."""
+    try:
+        return str(uuid.UUID(product_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
+
+
+@router.patch("/{product_id}")
+async def update_product(product_id: str, body: ProductPatch, admin_id: str = Depends(get_admin_user_id)):
+    """Admin edit of any product: admin_update_product() in migration 0013, one
+    transaction. Only the fields sent change; ingredients and sources, when
+    sent, replace the product's whole list. 409 {"detail": "stale"} when
+    updated_at is not the product's current value, so a second admin's save is
+    never silently overwritten.
+
+    A brand or name change regenerates the slug. The old slug is not kept and
+    does not resolve afterwards (owner's decision, 2026-10-04): the response
+    carries the new one.
+    """
+    try:
+        product_id = _require_product_uuid(product_id)
+        patch = body.patch_fields()
+        if "image_path" in patch:
+            path = patch.pop("image_path")
+            patch["image_url"] = image_upload.public_url(path) if path else None
+        try:
+            res = supabase.rpc("admin_update_product", {
+                "p_product_id": product_id,
+                "p_expected_updated_at": body.updated_at,
+                "p_patch": patch,
+            }).execute()
+        except APIError as err:
+            raise http_error_for_rpc(err, "PATCH /products/{id}")
+        saved = res.data or {}
+        detail = load_product_detail(product_id, admin_id) or {}
+        return {**detail, "id": product_id, "slug": saved.get("slug"), "updated_at": saved.get("updated_at")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PATCH /products/{id} error:", e)
+        raise HTTPException(status_code=500, detail="Failed to update the product.")
+
+
+@router.post("/{product_id}/image", openapi_extra=image_upload.UPLOAD_OPENAPI)
+async def upload_product_image(product_id: str, request: Request, admin_id: str = Depends(get_admin_user_id)):
+    """Stores a new image for the product and returns its image_path, for a
+    following PATCH /products/{id}. The product itself is not changed here."""
+    product_id = _require_product_uuid(product_id)
+    data, ext, content_type = await image_upload.read_image_upload(request)
+    try:
+        found = supabase.table("products").select("id").eq("id", product_id).limit(1).execute()
+        if not found.data:
+            raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
+        return image_upload.store_image(data, ext, content_type, "products")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("POST /products/{id}/image error:", e)
+        raise HTTPException(status_code=500, detail="Failed to store the image.")

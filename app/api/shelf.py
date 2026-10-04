@@ -5,6 +5,7 @@ from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
 from app.schemas import AnalysisResponse
 from app.core.services import compatibility_service
+from app.api.products import in_pack_order
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -13,8 +14,10 @@ router = APIRouter()
 @router.get("/")
 async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
-        response = supabase.table("shelf_items") \
-            .select("*, products(*, product_sources(claim, sources(*)), product_ingredients(ingredients(*, ingredient_sources(claim, sources(*)))))") \
+        # Each product's ingredients in pack order, as on the product page.
+        query = supabase.table("shelf_items") \
+            .select("*, products(*, product_sources(claim, sources(*)), product_ingredients(ingredients(*, ingredient_sources(claim, sources(*)))))")
+        response = in_pack_order(query, "products.product_ingredients") \
             .eq("user_id", user_id) \
             .execute()
         

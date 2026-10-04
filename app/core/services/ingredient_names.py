@@ -24,9 +24,23 @@ INCI_ALIAS_MAP = {
 }
 
 
+def clean_ingredient_text(raw_name: str) -> str:
+    """The name with its prefix, hyphens, brackets and asterisks dealt with,
+    lower-cased, before any alias is applied."""
+    return re.sub(r'[\(\)\*]', '', raw_name.replace("en:", "").replace("-", " ").strip().lower())
+
+
 def clean_and_normalize_ingredient(raw_name: str) -> str:
-    name = re.sub(r'[\(\)\*]', '', raw_name.replace("en:", "").replace("-", " ").strip().lower())
+    name = clean_ingredient_text(raw_name)
     return INCI_ALIAS_MAP.get(name, name.title())
+
+
+def matched_alias(raw_name: str):
+    """The INCI_ALIAS_MAP entry this name was mapped through ("aqua" for "Aqua"),
+    or None when no alias applied. Ingredient search and the paste matcher
+    return it, so the page can say why "aqua" found Water."""
+    name = clean_ingredient_text(raw_name)
+    return name if name in INCI_ALIAS_MAP else None
 
 
 def ingredient_key(raw_name: str) -> str:

@@ -10,6 +10,10 @@ from app.api import chat
 from app.api import routine
 from app.api import analysis
 from app.api import notifications
+from app.api import meta
+from app.api import ingredients
+from app.api import submissions
+from app.core.services.rpc_errors import BodyHTTPException, body_http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -51,3 +55,10 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(routine.router, prefix="/routine", tags=["Routine"])
 app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
+app.include_router(meta.router, prefix="/meta", tags=["Meta"])
+app.include_router(ingredients.router, prefix="/ingredients", tags=["Ingredients"])
+app.include_router(submissions.router, prefix="/submissions", tags=["Submissions"])
+
+# The 409 duplicate answer carries "candidates" beside "detail"; this handler
+# sends such a body as it is rather than wrapping it in {"detail": ...}.
+app.add_exception_handler(BodyHTTPException, body_http_exception_handler)

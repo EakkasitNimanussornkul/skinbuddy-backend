@@ -1,0 +1,256 @@
+"""Product submissions: a logged-in user proposes a product, an admin reviews it.
+
+Approval itself is approve_submission() in migration 0013, one transaction
+called by RPC, which creates a NEW product only and never updates an existing
+product or ingredients row. This module validates, stores and reads; the
+approve route passes the admin's body to the function as sent.
+
+Every /admin route depends on get_admin_user_id: 401 without a valid login,
+403 unless the caller's users row has role 'admin'.
+"""
+
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from postgrest.exceptions import APIError
+
+from app.core.services import image_upload, submission_service
+from app.core.services.ingredient_lookup import fetch_all_rows, load_ingredients
+from app.core.services.rpc_errors import BodyHTTPException, http_error_for_rpc
+from app.core.services.token import get_admin_user_id, get_current_user_id
+from app.db.connection import supabase
+from app.schemas import ApproveRequest, RejectRequest, SubmissionCreate, SubmissionEdit
+
+router = APIRouter()
+
+STATUSES = ("pending", "approved", "rejected")
+# Two foreign keys point product_submissions at users (submitted_by and
+# reviewed_by), so the embed names the column it follows.
+SUBMITTER_EMBED = "submitter:users!submitted_by(display_name)"
+
+
+def _not_pending(status: str) -> BodyHTTPException:
+    return BodyHTTPException(409, {"detail": f"the submission is {status}, not pending", "code": "SBNPD"})
+
+
+def _unknown_ingredient_ids(items: List[Dict[str, Any]]) -> List[str]:
+    """ingredient_ids in the stored items that are not in the ingredients table."""
+    wanted = {item["ingredient_id"] for item in items if item.get("ingredient_id")}
+    if not wanted:
+        return []
+    res = supabase.table("ingredients").select("id").in_("id", sorted(wanted)).execute()
+    found = {str(row["id"]) for row in (res.data or []) if str(row["id"]) in wanted}
+    return sorted(wanted - found)
+
+
+def _refuse_unknown_ids(items: List[Dict[str, Any]]) -> None:
+    unknown = _unknown_ingredient_ids(items)
+    if unknown:
+        raise BodyHTTPException(422, {"detail": "unknown ingredient_id", "code": "SBUNK", "details": unknown})
+
+
+def _load_submission(submission_id: str) -> Dict[str, Any]:
+    """The submission row with its submitter's name, or 404. A malformed id is a
+    404 too, rather than a Postgres type error answered as 500."""
+    try:
+        uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    res = (supabase.table("product_submissions").select(f"*, {SUBMITTER_EMBED}")
+           .eq("id", submission_id).limit(1).execute())
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return res.data[0]
+
+
+def _review_detail(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = submission_service.merged_payload(row)
+    return {
+        "id": row["id"],
+        "status": row.get("status"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "submitter_name": submission_service.submitter_name(row),
+        "reviewed_at": row.get("reviewed_at"),
+        "review_notes": row.get("review_notes"),
+        "product_id": row.get("product_id"),
+        "has_edits": bool(row.get("edited_payload")),
+        "submission": payload,
+        "duplicate_candidates": submission_service.duplicate_candidates(
+            payload.get("brand"), payload.get("name"), submission_service.load_products()),
+        "ingredients": submission_service.review_ingredients(payload, load_ingredients()),
+    }
+
+
+# --- Logged-in user ------------------------------------------------------------
+
+@router.post("/images", openapi_extra=image_upload.UPLOAD_OPENAPI)
+async def upload_submission_image(request: Request, user_id: str = Depends(get_current_user_id)):
+    data, ext, content_type = await image_upload.read_image_upload(request)
+    try:
+        return image_upload.store_image(data, ext, content_type, "submissions")
+    except Exception as e:
+        print("POST /submissions/images error:", e)
+        raise HTTPException(status_code=500, detail="Failed to store the image.")
+
+
+@router.post("", status_code=201)
+async def create_submission(body: SubmissionCreate, user_id: str = Depends(get_current_user_id)):
+    try:
+        payload = body.stored_payload()
+        _refuse_unknown_ids(payload["ingredients"])
+        res = supabase.table("product_submissions").insert({
+            "submitted_by": user_id, "status": "pending", "payload": payload,
+        }).execute()
+        row = res.data[0]
+        return {"id": row["id"], "status": row["status"], "created_at": row["created_at"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("POST /submissions error:", e)
+        raise HTTPException(status_code=500, detail="Failed to create submission.")
+
+
+@router.get("/mine")
+async def get_my_submissions(user_id: str = Depends(get_current_user_id)):
+    try:
+        rows = fetch_all_rows(lambda: supabase.table("product_submissions")
+                              .select("*, product:products(slug)")
+                              .eq("submitted_by", user_id).order("created_at", desc=True).order("id"))
+        rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        out = []
+        for row in rows:
+            product = row.get("product") if isinstance(row.get("product"), dict) else None
+            out.append({
+                "id": row["id"],
+                "status": row.get("status"),
+                "created_at": row.get("created_at"),
+                "reviewed_at": row.get("reviewed_at"),
+                "review_notes": row.get("review_notes"),
+                "product_id": row.get("product_id"),
+                "product_slug": product.get("slug") if product else None,
+                "summary": submission_service.summary(submission_service.merged_payload(row)),
+            })
+        return out
+    except Exception as e:
+        print("GET /submissions/mine error:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch your submissions.")
+
+
+# --- Admin only ----------------------------------------------------------------
+
+@router.get("/admin")
+async def list_submissions_for_review(
+    status: Literal["pending", "approved", "rejected"] = Query("pending"),
+    admin_id: str = Depends(get_admin_user_id),
+):
+    try:
+        all_statuses = fetch_all_rows(
+            lambda: supabase.table("product_submissions").select("id, status").order("id"))
+        counts = {s: sum(1 for r in all_statuses if r.get("status") == s) for s in STATUSES}
+
+        rows = fetch_all_rows(lambda: supabase.table("product_submissions")
+                              .select(f"*, {SUBMITTER_EMBED}")
+                              .eq("status", status).order("created_at").order("id"))
+        rows.sort(key=lambda r: r.get("created_at") or "")
+        products = submission_service.load_products()
+        items = []
+        for row in rows:
+            payload = submission_service.merged_payload(row)
+            items.append({
+                "id": row["id"],
+                "status": row.get("status"),
+                "created_at": row.get("created_at"),
+                "submitter_name": submission_service.submitter_name(row),
+                "summary": submission_service.summary(payload),
+                "flags": submission_service.flags(payload, products),
+            })
+        return {"counts": counts, "submissions": items}
+    except Exception as e:
+        print("GET /submissions/admin error:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch submissions.")
+
+
+@router.get("/admin/{submission_id}")
+async def get_submission_for_review(submission_id: str, admin_id: str = Depends(get_admin_user_id)):
+    try:
+        return _review_detail(_load_submission(submission_id))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("GET /submissions/admin/{id} error:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch the submission.")
+
+
+@router.patch("/admin/{submission_id}")
+async def edit_submission(submission_id: str, body: SubmissionEdit, admin_id: str = Depends(get_admin_user_id)):
+    """Saves only the fields sent, on top of earlier edits; the user's payload is
+    never changed. An unsent field keeps the user's value."""
+    try:
+        row = _load_submission(submission_id)
+        if row.get("status") != "pending":
+            raise _not_pending(row.get("status"))
+        edits = body.stored_edits()
+        if "ingredients" in edits:
+            _refuse_unknown_ids(edits["ingredients"])
+        previous = row.get("edited_payload") if isinstance(row.get("edited_payload"), dict) else {}
+        res = (supabase.table("product_submissions")
+               .update({"edited_payload": {**previous, **edits}})
+               .eq("id", submission_id).eq("status", "pending").execute())
+        if not res.data:            # reviewed between the read and the write
+            raise _not_pending("no longer pending")
+        return _review_detail(_load_submission(submission_id))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PATCH /submissions/admin/{id} error:", e)
+        raise HTTPException(status_code=500, detail="Failed to save the edits.")
+
+
+@router.post("/admin/{submission_id}/approve")
+async def approve_submission(submission_id: str, body: ApproveRequest, admin_id: str = Depends(get_admin_user_id)):
+    try:
+        row = _load_submission(submission_id)
+        image_path = submission_service.merged_payload(row).get("image_path")
+        image_url = image_upload.public_url(image_path) if isinstance(image_path, str) and image_path else None
+        try:
+            res = supabase.rpc("approve_submission", {
+                "p_submission_id": submission_id,
+                "p_admin_id": admin_id,
+                "p_decisions": body.as_sent(),
+                "p_image_url": image_url,
+            }).execute()
+        except APIError as err:
+            raise http_error_for_rpc(err, "POST /submissions/admin/{id}/approve")
+        return res.data
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("POST /submissions/admin/{id}/approve error:", e)
+        raise HTTPException(status_code=500, detail="Failed to approve the submission.")
+
+
+@router.post("/admin/{submission_id}/reject")
+async def reject_submission(submission_id: str, body: RejectRequest, admin_id: str = Depends(get_admin_user_id)):
+    try:
+        row = _load_submission(submission_id)
+        if row.get("status") != "pending":
+            raise _not_pending(row.get("status"))
+        res = (supabase.table("product_submissions").update({
+            "status": "rejected",
+            "review_notes": body.review_notes,
+            "reviewed_by": admin_id,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", submission_id).eq("status", "pending").execute())
+        if not res.data:
+            raise _not_pending("no longer pending")
+        done = res.data[0]
+        return {"id": done["id"], "status": done["status"],
+                "reviewed_at": done.get("reviewed_at"), "review_notes": done.get("review_notes")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("POST /submissions/admin/{id}/reject error:", e)
+        raise HTTPException(status_code=500, detail="Failed to reject the submission.")

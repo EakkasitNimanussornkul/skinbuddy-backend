@@ -1,6 +1,9 @@
 import re
-from pydantic import BaseModel, field_validator
-from typing import Optional, Dict, List, Any, Literal
+from urllib.parse import urlparse
+from uuid import UUID
+from pydantic import (AfterValidator, BaseModel, ConfigDict, Field, StringConstraints,
+                      field_validator, model_validator)
+from typing import Annotated, Optional, Dict, List, Any, Literal
 
 # Baumann 16-Type code: one letter from each axis pair (O/D, S/R, P/N, W/T).
 # Public rather than underscore-prefixed: app/api/products.py imports it so the
@@ -158,6 +161,14 @@ class ProductDetail(ProductResponse):
     match_breakdown: Optional[MatchBreakdown] = None
     match_reasons: Optional[List[str]] = []
     caution_reasons: Optional[List[str]] = []
+
+    # Migration 0013. Declared so GET /products/compare, which serialises
+    # products through this model, does not drop them: a field a response model
+    # does not declare is silently removed on the way out.
+    benefits: Optional[List[str]] = None      # the benefits an admin published; None when unset
+    good_for: Optional[List[str]] = None      # concern tags (CONCERN_TAGS); None when unset
+    pao_months: Optional[int] = None          # period after opening: 6, 12 or 24
+    updated_at: Optional[str] = None          # PATCH /products/{id} needs it back exactly as sent
 
     class Config:
         from_attributes = True
@@ -318,3 +329,269 @@ class SkinLogCreate(BaseModel):
     affected_areas: List[str] = []
     notes: Optional[str] = None
     week_start: Optional[str] = None
+
+
+# 11. PRODUCT SUBMISSIONS, ADMIN REVIEW AND PRODUCT EDITING
+#
+# The lists below are the contract's (contracts-submissions-admin.md, approved
+# 2026-10-04). Each is defined once: GET /meta/* serves it and the request
+# models below validate against it, so what the page offers and what the API
+# accepts cannot drift apart.
+
+CATEGORIES = ("Cleansers", "Toners", "Serums", "Treatments", "Moisturizers",
+              "Exfoliators", "Sun Care", "Masks", "Eye Care")
+CONCERN_TAGS = ("Dry skin", "Dehydrated", "Sensitive", "Oily", "Acne-prone",
+                "Dark spots", "Dullness", "Fine lines", "Redness")
+INGREDIENT_ROLES = ("Moisturising", "Soothing", "Barrier support", "Exfoliating",
+                    "Brightening", "Preservative", "Not sure")
+# product_sources.claim's check constraint (migration 0010).
+PRODUCT_SOURCE_CLAIMS = ("listing", "description", "price", "image")
+# sources.source_type's check constraint (migration 0009).
+SOURCE_TYPES = ("regulatory_register", "safety_review", "chemical_database",
+                "peer_reviewed", "reference_book", "product_database")
+PAO_MONTHS = (6, 12, 24)
+
+Category = Literal[CATEGORIES]
+ConcernTag = Literal[CONCERN_TAGS]
+IngredientRole = Literal[INGREDIENT_ROLES]
+ProductSourceClaim = Literal[PRODUCT_SOURCE_CLAIMS]
+SourceType = Literal[SOURCE_TYPES]
+PaoMonths = Literal[PAO_MONTHS]
+
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# Paths the upload routes create: <folder>/<uuid>.<ext>. Anything else is not
+# one of our uploads and is refused, so a payload cannot point a product page at
+# an arbitrary object in the bucket.
+SUBMISSION_IMAGE_PATH = re.compile(rf"^submissions/{_UUID}\.(jpg|png|webp)$")
+PRODUCT_IMAGE_PATH = re.compile(rf"^(submissions|products)/{_UUID}\.(jpg|png|webp)$")
+
+
+def _http_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("must be an http(s) URL")
+    return value
+
+
+def _submission_image_path(value: str) -> str:
+    if not SUBMISSION_IMAGE_PATH.match(value):
+        raise ValueError("must be an image_path returned by POST /submissions/images")
+    return value
+
+
+def _product_image_path(value: str) -> str:
+    if not PRODUCT_IMAGE_PATH.match(value):
+        raise ValueError("must be an image_path returned by an upload route")
+    return value
+
+
+def _text(max_length: int, min_length: int = 1):
+    return Annotated[str, StringConstraints(strip_whitespace=True, min_length=min_length, max_length=max_length)]
+
+
+HttpUrlText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+                        AfterValidator(_http_url)]
+SubmissionImagePath = Annotated[str, AfterValidator(_submission_image_path)]
+ProductImagePath = Annotated[str, AfterValidator(_product_image_path)]
+Price = Annotated[float, Field(ge=0)]
+
+
+def _refuse_explicit_nulls(model: BaseModel, fields) -> None:
+    """A field that may be left out but, when sent, may not be null."""
+    for name in fields:
+        if name in model.model_fields_set and getattr(model, name) is None:
+            raise ValueError(f"{name} cannot be null")
+
+
+class NewIngredientDetails(BaseModel):
+    """What a user knows about an ingredient that is not in our list. All optional."""
+    model_config = ConfigDict(extra="forbid")
+
+    roles: Annotated[List[IngredientRole], Field(max_length=len(INGREDIENT_ROLES))] = []
+    known_for: Optional[_text(200, 0)] = None
+    source_url: Optional[HttpUrlText] = None
+
+
+class SubmissionIngredient(BaseModel):
+    """{"ingredient_id": uuid} for one picked from our list, or {"new_name": str,
+    "details"?: {...}} for one typed in. Exactly one of the two."""
+    model_config = ConfigDict(extra="forbid")
+
+    ingredient_id: Optional[UUID] = None
+    new_name: Optional[_text(120)] = None
+    details: Optional[NewIngredientDetails] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if (self.ingredient_id is None) == (self.new_name is None):
+            raise ValueError("each ingredient needs exactly one of ingredient_id or new_name")
+        if self.ingredient_id is not None and self.details is not None:
+            raise ValueError("details go with new_name, not with ingredient_id")
+        return self
+
+    def stored(self) -> Dict[str, Any]:
+        """The item as it is stored in the payload: only the keys that were set."""
+        return self.model_dump(mode="json", exclude_none=True)
+
+
+class SubmissionSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: HttpUrlText
+    title: _text(120)
+    claims: Annotated[List[ProductSourceClaim], Field(min_length=1, max_length=len(PRODUCT_SOURCE_CLAIMS))]
+
+
+SubmissionIngredients = Annotated[List[SubmissionIngredient], Field(min_length=1, max_length=100)]
+Benefits = Annotated[List[_text(80)], Field(max_length=8)]
+GoodFor = Annotated[List[ConcernTag], Field(max_length=len(CONCERN_TAGS))]
+SubmissionSources = Annotated[List[SubmissionSource], Field(max_length=5)]
+
+
+class SubmissionCreate(BaseModel):
+    """POST /submissions. The whole body is stored as the submission's payload."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: _text(200)
+    brand: _text(200)
+    category: Category
+    image_path: Optional[SubmissionImagePath] = None
+    ingredients: SubmissionIngredients            # in the order printed on the pack
+    price_thb: Optional[Price] = None
+    price_usd: Optional[Price] = None
+    pao_months: Optional[PaoMonths] = None
+    benefits: Benefits = []
+    good_for: GoodFor = []
+    sources: SubmissionSources = []
+    note: Optional[_text(1000, 0)] = None
+
+    def stored_payload(self) -> Dict[str, Any]:
+        payload = self.model_dump(mode="json")
+        payload["ingredients"] = [item.stored() for item in self.ingredients]
+        return payload
+
+
+class SubmissionEdit(BaseModel):
+    """PATCH /submissions/admin/{id}: the POST body with every field optional.
+    Only the fields sent are saved to edited_payload."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[_text(200)] = None
+    brand: Optional[_text(200)] = None
+    category: Optional[Category] = None
+    image_path: Optional[SubmissionImagePath] = None
+    ingredients: Optional[SubmissionIngredients] = None
+    price_thb: Optional[Price] = None
+    price_usd: Optional[Price] = None
+    pao_months: Optional[PaoMonths] = None
+    benefits: Optional[Benefits] = None
+    good_for: Optional[GoodFor] = None
+    sources: Optional[SubmissionSources] = None
+    note: Optional[_text(1000, 0)] = None
+
+    @model_validator(mode="after")
+    def _no_nulls_where_a_value_is_needed(self):
+        _refuse_explicit_nulls(self, ("name", "brand", "category", "ingredients",
+                                      "benefits", "good_for", "sources"))
+        return self
+
+    def stored_edits(self) -> Dict[str, Any]:
+        edits = self.model_dump(mode="json", exclude_unset=True)
+        if self.ingredients is not None:
+            edits["ingredients"] = [item.stored() for item in self.ingredients]
+        return edits
+
+
+class NewIngredientDecision(BaseModel):
+    """One admin decision on a new ingredient. Its rules (one decision per new
+    name, a decision from the three, a real position) are checked inside
+    approve_submission(), so the API and the SQL cannot disagree about them."""
+    model_config = ConfigDict(extra="allow")
+
+    position: Optional[int] = None
+    decision: Optional[str] = None
+    functional_group: Optional[str] = None
+    benefits: Optional[str] = None
+
+
+class ApproveRequest(BaseModel):
+    """POST /submissions/admin/{id}/approve. Passed to approve_submission()
+    as sent: only the keys the admin sent, nothing added."""
+    model_config = ConfigDict(extra="allow")
+
+    publish_benefits: List[str] = []
+    publish_good_for: List[str] = []
+    publish_source_urls: List[str] = []
+    new_ingredients: List[NewIngredientDecision] = []
+
+    def as_sent(self) -> Dict[str, Any]:
+        return self.model_dump(mode="json", exclude_unset=True)
+
+
+class RejectRequest(BaseModel):
+    review_notes: Optional[_text(1000, 0)] = None
+
+
+class IngredientMatchRequest(BaseModel):
+    names: Annotated[List[Annotated[str, StringConstraints(max_length=300)]], Field(max_length=100)]
+
+
+class ProductIngredientRef(BaseModel):
+    """{"ingredient_id": uuid} or {"new_name": str}: exactly one."""
+    model_config = ConfigDict(extra="forbid")
+
+    ingredient_id: Optional[UUID] = None
+    new_name: Optional[_text(120)] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if (self.ingredient_id is None) == (self.new_name is None):
+            raise ValueError("each ingredient needs exactly one of ingredient_id or new_name")
+        return self
+
+
+class ProductSourceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: HttpUrlText
+    title: _text(120)
+    publisher: Optional[_text(200)] = None
+    source_type: Optional[SourceType] = None      # product_database when left out
+    claims: Annotated[List[ProductSourceClaim], Field(min_length=1, max_length=len(PRODUCT_SOURCE_CLAIMS))]
+
+
+class ProductPatch(BaseModel):
+    """PATCH /products/{id}. Every field optional except updated_at, the value
+    the admin loaded, which is passed to the database exactly as received: it
+    carries microseconds, and any reformatting would read as a stale edit."""
+    model_config = ConfigDict(extra="forbid")
+
+    updated_at: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    name: Optional[_text(200)] = None
+    brand: Optional[_text(200)] = None
+    category: Optional[Category] = None
+    description: Optional[_text(2000, 0)] = None
+    price_thb: Optional[Price] = None
+    price_usd: Optional[Price] = None
+    pao_months: Optional[PaoMonths] = None
+    image_path: Optional[ProductImagePath] = None
+    benefits: Optional[Benefits] = None
+    good_for: Optional[GoodFor] = None
+    ingredients: Optional[Annotated[List[ProductIngredientRef], Field(min_length=1, max_length=100)]] = None
+    sources: Optional[Annotated[List[ProductSourceIn], Field(max_length=10)]] = None
+
+    @model_validator(mode="after")
+    def _no_nulls_where_a_value_is_needed(self):
+        _refuse_explicit_nulls(self, ("name", "brand", "category", "ingredients", "sources"))
+        return self
+
+    def patch_fields(self) -> Dict[str, Any]:
+        """The fields sent, minus updated_at, with list items reduced to the keys
+        that were set. image_path is left for the route to turn into a URL."""
+        patch = self.model_dump(mode="json", exclude_unset=True)
+        patch.pop("updated_at", None)
+        if self.ingredients is not None:
+            patch["ingredients"] = [i.model_dump(mode="json", exclude_none=True) for i in self.ingredients]
+        if self.sources is not None:
+            patch["sources"] = [s.model_dump(mode="json", exclude_none=True) for s in self.sources]
+        return patch

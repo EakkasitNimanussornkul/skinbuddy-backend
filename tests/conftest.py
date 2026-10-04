@@ -265,3 +265,88 @@ def client():
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+# --- RPC and storage, for the submission and product-edit routes ---------------
+#
+# The routes behind migration 0013 call two things the plain fake above lacks:
+# supabase.rpc(name, params).execute() and supabase.storage.from_(bucket). This
+# fake adds both, and records every .order() call, because the order of a
+# product's ingredients is set by a query parameter the plain fake ignores.
+
+FAKE_STORAGE_BASE = "https://test-project.supabase.co/storage/v1/object/public"
+
+
+class FakeRpcCall:
+    def __init__(self, owner, name, params):
+        self._owner, self._name, self._params = owner, name, params
+
+    def execute(self):
+        self._owner.rpc_calls.append((self._name, self._params))
+        result = self._owner.rpc_results.get(self._name)
+        if isinstance(result, Exception):
+            raise result
+        return FakeResponse(result)
+
+
+class FakeBucket:
+    def __init__(self, owner, bucket):
+        self._owner, self._bucket = owner, bucket
+
+    def upload(self, path, data, options=None):
+        self._owner.uploads.append({"bucket": self._bucket, "path": path, "data": data, "options": options})
+        return {"path": path}
+
+    def get_public_url(self, path, options=None):
+        return f"{FAKE_STORAGE_BASE}/{self._bucket}/{path}"
+
+
+class FakeStorage:
+    def __init__(self):
+        self.uploads = []
+
+    def from_(self, bucket):
+        return FakeBucket(self, bucket)
+
+
+class RecordingQuery(FakeQuery):
+    def __init__(self, table_name, store, orders):
+        super().__init__(table_name, store)
+        self._orders = orders
+
+    def order(self, column, **kwargs):
+        self._orders.append((self._table_name, column, kwargs))
+        return self
+
+
+class FakeSupabaseWithRpc(FakeSupabase):
+    def __init__(self, store=None):
+        super().__init__(store)
+        self.rpc_calls = []
+        self.rpc_results = {}
+        self.orders = []
+        self.storage = FakeStorage()
+
+    def table(self, name):
+        return RecordingQuery(name, self.store, self.orders)
+
+    def rpc(self, name, params):
+        return FakeRpcCall(self, name, params)
+
+
+@pytest.fixture
+def patch_backend(monkeypatch):
+    """Like patch_supabase, with rpc(), storage and a record of .order() calls.
+
+        fake = patch_backend({"products": rows}, "app.api.products")
+        fake.rpc_results["admin_update_product"] = {...}   # or an APIError to raise
+    """
+    def _patch(store, *module_paths):
+        import importlib
+
+        fake = FakeSupabaseWithRpc(store)
+        for path in module_paths:
+            monkeypatch.setattr(importlib.import_module(path), "supabase", fake)
+        return fake
+
+    return _patch
