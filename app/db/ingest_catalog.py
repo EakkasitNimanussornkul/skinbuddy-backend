@@ -8,6 +8,9 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from app.db.connection import supabase
 from app.core.utils import create_slug
+# The normaliser and its alias map live in one shared module, so search, the
+# paste matcher and submission approval use the same rules as this importer.
+from app.core.services.ingredient_names import INCI_ALIAS_MAP, clean_and_normalize_ingredient  # noqa: F401
 from app.core.services.ingredient_dictionary import parse_ingredient_data
 from app.core.services.image_service import fetch_and_store_product_image
 
@@ -47,16 +50,6 @@ PRODUCT_NAME_REPLACEMENTS = {
     "solaire": "Sun Care"
 }
 
-INCI_ALIAS_MAP = {
-    "aqua": "Water", "eau": "Water", "purified water": "Water",
-    "glycerol": "Glycerin", "l ascorbic acid": "Ascorbic Acid",
-    "vitamin c": "Ascorbic Acid", "vitamin e": "Tocopherol",
-    "provitamin b5": "Panthenol", "d-panthenol": "Panthenol",
-    "bha": "Salicylic Acid", "aha": "Glycolic Acid",
-    "hyaluronate sodium": "Sodium Hyaluronate", "centella asiatica extract": "Centella Asiatica",
-    "alcool cétylique": "Cetyl Alcohol", "cholestérol": "Cholesterol"
-}
-
 def sanitize_product_name(raw_name: str) -> str:
     """Cleans up non-English cosmetic terms from product names to ensure uniform terminology."""
     working_name = raw_name.lower()
@@ -69,10 +62,6 @@ def sanitize_product_name(raw_name: str) -> str:
     # Standard clean up and conversion to Title Case
     working_name = re.sub(r'\s+', ' ', working_name).strip()
     return working_name.title()
-
-def clean_and_normalize_ingredient(raw_name: str) -> str:
-    name = re.sub(r'[\(\)\*]', '', raw_name.replace("en:", "").replace("-", " ").strip().lower())
-    return INCI_ALIAS_MAP.get(name, name.title())
 
 def determine_smart_category(prod_name: str, raw_cat: str) -> str:
     combined_text = f"{prod_name} {raw_cat}".lower()
