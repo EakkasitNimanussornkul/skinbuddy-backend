@@ -14,6 +14,13 @@ httpx==0.28.1
 PyJWT==2.12.1
 python-dotenv==1.2.2
 
+# Upload hardening: every uploaded image is decoded and re-encoded
+# (app/core/services/image_upload.py).
+pillow==12.3.0
+# Hostname checks for submitted links (app/core/input_safety.py). Already
+# installed as an httpx dependency; listed because the app imports it directly.
+idna==3.13
+
 # Chatbot / RAG
 langchain-core==1.4.7
 langchain-google-genai==4.2.5

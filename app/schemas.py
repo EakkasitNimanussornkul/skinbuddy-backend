@@ -1,9 +1,11 @@
 import re
-from urllib.parse import urlparse
 from uuid import UUID
-from pydantic import (AfterValidator, BaseModel, ConfigDict, Field, StringConstraints,
+from functools import partial
+from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints,
                       field_validator, model_validator)
 from typing import Annotated, Optional, Dict, List, Any, Literal
+
+from app.core.input_safety import check_public_url, clean_text
 
 # Baumann 16-Type code: one letter from each axis pair (O/D, S/R, P/N, W/T).
 # Public rather than underscore-prefixed: app/api/products.py imports it so the
@@ -367,26 +369,35 @@ PRODUCT_IMAGE_PATH = re.compile(rf"^(submissions|products)/{_UUID}\.(jpg|png|web
 
 
 def _http_url(value: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("must be an http(s) URL")
-    return value
+    """An http(s) link fit to publish: see check_public_url in
+    app/core/input_safety.py. The backend never fetches these URLs; the rules
+    keep junk and internal links (localhost, private IPs, user:pass@) off
+    product pages. The value is stored as sent, after the whitespace trim."""
+    return check_public_url(value)
 
 
+# fullmatch, not match: "$" also matches before a trailing newline, so
+# match() let "submissions/<uuid>.jpg" plus a newline through.
 def _submission_image_path(value: str) -> str:
-    if not SUBMISSION_IMAGE_PATH.match(value):
+    if not SUBMISSION_IMAGE_PATH.fullmatch(value):
         raise ValueError("must be an image_path returned by POST /submissions/images")
     return value
 
 
 def _product_image_path(value: str) -> str:
-    if not PRODUCT_IMAGE_PATH.match(value):
+    if not PRODUCT_IMAGE_PATH.fullmatch(value):
         raise ValueError("must be an image_path returned by an upload route")
     return value
 
 
-def _text(max_length: int, min_length: int = 1):
-    return Annotated[str, StringConstraints(strip_whitespace=True, min_length=min_length, max_length=max_length)]
+def _text(max_length: int, min_length: int = 1, multiline: bool = False):
+    """Submitted text: invisible and control characters cleaned out first
+    (clean_text in app/core/input_safety.py), then trimmed and length-checked,
+    so a name made only of zero-width spaces is refused as empty. multiline
+    keeps line breaks and tabs (notes, descriptions)."""
+    return Annotated[str,
+                     StringConstraints(strip_whitespace=True, min_length=min_length, max_length=max_length),
+                     BeforeValidator(partial(clean_text, multiline=multiline))]
 
 
 HttpUrlText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
@@ -463,7 +474,7 @@ class SubmissionCreate(BaseModel):
     benefits: Benefits = []
     good_for: GoodFor = []
     sources: SubmissionSources = []
-    note: Optional[_text(1000, 0)] = None
+    note: Optional[_text(1000, 0, multiline=True)] = None
 
     def stored_payload(self) -> Dict[str, Any]:
         payload = self.model_dump(mode="json")
@@ -487,7 +498,7 @@ class SubmissionEdit(BaseModel):
     benefits: Optional[Benefits] = None
     good_for: Optional[GoodFor] = None
     sources: Optional[SubmissionSources] = None
-    note: Optional[_text(1000, 0)] = None
+    note: Optional[_text(1000, 0, multiline=True)] = None
 
     @model_validator(mode="after")
     def _no_nulls_where_a_value_is_needed(self):
@@ -521,7 +532,9 @@ class ApproveRequest(BaseModel):
 
     publish_benefits: List[str] = []
     publish_good_for: List[str] = []
-    publish_source_urls: List[str] = []
+    # Checked by the same link rules as the submission's own sources (422 with
+    # loc ["body", "publish_source_urls", i]), and passed on unchanged.
+    publish_source_urls: List[Annotated[str, AfterValidator(check_public_url)]] = []
     new_ingredients: List[NewIngredientDecision] = []
 
     def as_sent(self) -> Dict[str, Any]:
@@ -529,7 +542,7 @@ class ApproveRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
-    review_notes: Optional[_text(1000, 0)] = None
+    review_notes: Optional[_text(1000, 0, multiline=True)] = None
 
 
 class IngredientMatchRequest(BaseModel):
@@ -570,7 +583,7 @@ class ProductPatch(BaseModel):
     name: Optional[_text(200)] = None
     brand: Optional[_text(200)] = None
     category: Optional[Category] = None
-    description: Optional[_text(2000, 0)] = None
+    description: Optional[_text(2000, 0, multiline=True)] = None
     price_thb: Optional[Price] = None
     price_usd: Optional[Price] = None
     pao_months: Optional[PaoMonths] = None

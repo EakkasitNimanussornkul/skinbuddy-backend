@@ -1,13 +1,19 @@
 """POST /submissions/images and POST /products/{id}/image.
 
 A file is judged by its first bytes, never by its name or declared type: jpeg,
-png and webp are stored, anything else is 415, more than 5 MB is 413. Storage is
-a fake (tests/conftest.py), so nothing reaches the live bucket.
+png and webp are accepted, anything else is 415, more than 5 MB is 413. What is
+stored is the image re-encoded by Pillow, never the bytes sent (the hardening
+tests are in test_upload_hardening.py). Storage is a fake (tests/conftest.py),
+so nothing reaches the live bucket.
 """
 
 import asyncio
+import io
 import os
 import re
+
+import httpx
+from PIL import Image
 
 import pytest
 from fastapi import HTTPException
@@ -19,9 +25,18 @@ UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 PROD_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 FIVE_MB = 5 * 1024 * 1024
 
-JPEG = b"\xff\xd8\xff\xe0" + b"\x00\x10JFIF" + b"\x01" * 64
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x02" * 64
-WEBP = b"RIFF" + b"\x24\x00\x00\x00" + b"WEBPVP8 " + b"\x03" * 64
+
+
+def _image(fmt):
+    """A real 8x8 image in the given Pillow format: uploads are decoded now."""
+    out = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 120, 40)).save(out, fmt)
+    return out.getvalue()
+
+
+JPEG = _image("JPEG")
+PNG = _image("PNG")
+WEBP = _image("WEBP")
 GIF = b"GIF89a" + b"\x04" * 64
 
 MODULES = ("app.core.services.image_upload", "app.core.services.token", "app.api.products")
@@ -43,8 +58,9 @@ def upload(client, data, filename="photo.jpg", content_type="image/jpeg", path="
 ], ids=["jpeg", "png", "webp"])
 def test_upload_accepts_jpeg_png_and_webp(client, storage, data, ext, content_type):
     """Returns HTTP 200 with image_path "submissions/<uuid>.<ext>" and its public URL,
-    and stores the bytes unchanged in the product-images bucket under that path, with
-    the content type the bytes show (even though every file is sent named photo.jpg)."""
+    and stores a re-encoded image of the same format and size in the product-images
+    bucket under that path, with the content type the bytes show (even though every
+    file is sent named photo.jpg)."""
     resp = upload(client, data)
     assert resp.status_code == 200
     body = resp.json()
@@ -52,7 +68,8 @@ def test_upload_accepts_jpeg_png_and_webp(client, storage, data, ext, content_ty
     assert body["public_url"].endswith(f"/product-images/{body['image_path']}")
     [stored] = storage.storage.uploads
     assert stored["bucket"] == "product-images" and stored["path"] == body["image_path"]
-    assert stored["data"] == data
+    assert image_upload.sniff_image_type(stored["data"]) == (ext, content_type)
+    assert Image.open(io.BytesIO(stored["data"])).size == (8, 8)
     assert stored["options"]["content-type"] == content_type
 
 
@@ -81,7 +98,7 @@ def test_upload_of_exactly_5_mb_is_accepted(client, storage):
     """Returns HTTP 200 for a PNG of exactly 5 MB: the limit is inclusive."""
     resp = upload(client, PNG + b"\x00" * (FIVE_MB - len(PNG)), "limit.png", "image/png")
     assert resp.status_code == 200
-    assert len(storage.storage.uploads[0]["data"]) == FIVE_MB
+    assert image_upload.sniff_image_type(storage.storage.uploads[0]["data"]) == ("png", "image/png")
 
 
 def test_upload_far_over_the_limit_is_refused_while_streaming(client, storage):
@@ -132,12 +149,15 @@ def test_upload_without_a_file_field_is_refused_with_422(client, storage):
     assert storage.storage.uploads == []
 
 
-def test_upload_keeps_binary_content_byte_for_byte(client, storage):
-    """Stores exactly the bytes sent, for a JPEG whose body holds CR, LF, CRLF, NUL and
-    "--" sequences that a careless multipart parser would cut or alter."""
+def test_upload_keeps_binary_content_byte_for_byte():
+    """The multipart reader returns exactly the bytes sent, for a file whose body holds
+    CR, LF, CRLF, NUL and "--" sequences that a careless multipart parser would cut or
+    alter, in a body built by httpx as a browser would send it."""
     data = JPEG + b"\r\n--\r\n\r\n\x00\r\r\n\n--x" + os.urandom(200_000) + b"\r\n"
-    assert upload(client, data).status_code == 200
-    assert storage.storage.uploads[0]["data"] == data
+    request = httpx.Request("POST", "http://test/submissions/images",
+                            files={"file": ("photo.jpg", data, "image/jpeg")})
+    body = request.read()
+    assert image_upload.parse_multipart_file(body, request.headers["content-type"]) == data
 
 
 def test_parse_multipart_file_reads_the_named_field_among_others():

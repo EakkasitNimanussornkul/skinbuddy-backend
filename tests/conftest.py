@@ -350,3 +350,13 @@ def patch_backend(monkeypatch):
         return fake
 
     return _patch
+
+
+@pytest.fixture(autouse=True)
+def _fresh_upload_limiter():
+    """The upload rate limit (20 an hour per user) is process-wide; start every
+    test with no uploads counted, so tests that upload do not use up each other's."""
+    from app.api.submissions import upload_limiter
+    upload_limiter.reset()
+    yield
+    upload_limiter.reset()

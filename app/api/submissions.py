@@ -7,6 +7,9 @@ approve route passes the admin's body to the function as sent.
 
 Every /admin route depends on get_admin_user_id: 401 without a valid login,
 403 unless the caller's users row has role 'admin'.
+
+Abuse limits (429): a user may have at most MAX_PENDING_PER_USER submissions
+waiting for review, and may upload at most UPLOADS_PER_HOUR images an hour.
 """
 
 import uuid
@@ -18,10 +21,12 @@ from postgrest.exceptions import APIError
 
 from app.core.services import image_upload, submission_service
 from app.core.services.ingredient_lookup import fetch_all_rows, load_ingredients
+from app.core.services.rate_limit import SlidingWindowLimiter
 from app.core.services.rpc_errors import BodyHTTPException, http_error_for_rpc
 from app.core.services.token import get_admin_user_id, get_current_user_id
 from app.db.connection import supabase
-from app.schemas import ApproveRequest, RejectRequest, SubmissionCreate, SubmissionEdit
+from app.schemas import (SUBMISSION_IMAGE_PATH, ApproveRequest, RejectRequest, SubmissionCreate,
+                         SubmissionEdit)
 
 router = APIRouter()
 
@@ -29,6 +34,22 @@ STATUSES = ("pending", "approved", "rejected")
 # Two foreign keys point product_submissions at users (submitted_by and
 # reviewed_by), so the embed names the column it follows.
 SUBMITTER_EMBED = "submitter:users!submitted_by(display_name)"
+
+# Enough for a keen user's batch; more than this waiting at once is flooding
+# the review queue.
+MAX_PENDING_PER_USER = 10
+MSG_TOO_MANY_PENDING = (f"You already have {MAX_PENDING_PER_USER} submissions waiting for review. "
+                        "You can send another once an admin has reviewed one.")
+
+# Uploads are stored (and public) as soon as they arrive, before any submission
+# uses them, so they are rate-limited per user. Counted on every attempt, as
+# each one costs a decode. In memory: see app/core/services/rate_limit.py.
+UPLOADS_PER_HOUR = 20
+upload_limiter = SlidingWindowLimiter(UPLOADS_PER_HOUR, 3600)
+MSG_TOO_MANY_UPLOADS = f"Too many image uploads: at most {UPLOADS_PER_HOUR} an hour. Try again later."
+
+MSG_BAD_STORED_IMAGE = ("The submission's image_path is not an uploaded image. "
+                        "Save a new photo with PATCH /submissions/admin/{id} first.")
 
 
 def _not_pending(status: str) -> BodyHTTPException:
@@ -88,6 +109,10 @@ def _review_detail(row: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.post("/images", openapi_extra=image_upload.UPLOAD_OPENAPI)
 async def upload_submission_image(request: Request, user_id: str = Depends(get_current_user_id)):
+    retry_after = upload_limiter.hit(user_id)
+    if retry_after is not None:
+        raise HTTPException(status_code=429, detail=MSG_TOO_MANY_UPLOADS,
+                            headers={"Retry-After": str(retry_after)})
     data, ext, content_type = await image_upload.read_image_upload(request)
     try:
         return image_upload.store_image(data, ext, content_type, "submissions")
@@ -100,6 +125,12 @@ async def upload_submission_image(request: Request, user_id: str = Depends(get_c
 async def create_submission(body: SubmissionCreate, user_id: str = Depends(get_current_user_id)):
     try:
         payload = body.stored_payload()
+        # A soft cap: two requests racing could both pass it, which is harmless.
+        waiting = (supabase.table("product_submissions").select("id")
+                   .eq("submitted_by", user_id).eq("status", "pending")
+                   .limit(MAX_PENDING_PER_USER).execute())
+        if len(waiting.data or []) >= MAX_PENDING_PER_USER:
+            raise HTTPException(status_code=429, detail=MSG_TOO_MANY_PENDING)
         _refuse_unknown_ids(payload["ingredients"])
         res = supabase.table("product_submissions").insert({
             "submitted_by": user_id, "status": "pending", "payload": payload,
@@ -214,7 +245,13 @@ async def approve_submission(submission_id: str, body: ApproveRequest, admin_id:
     try:
         row = _load_submission(submission_id)
         image_path = submission_service.merged_payload(row).get("image_path")
-        image_url = image_upload.public_url(image_path) if isinstance(image_path, str) and image_path else None
+        image_url = None
+        if image_path:
+            # Checked on the way in, and again here, so the product's image_url
+            # can only ever be one of our uploads in our bucket.
+            if not isinstance(image_path, str) or not SUBMISSION_IMAGE_PATH.fullmatch(image_path):
+                raise HTTPException(status_code=422, detail=MSG_BAD_STORED_IMAGE)
+            image_url = image_upload.public_url(image_path)
         try:
             res = supabase.rpc("approve_submission", {
                 "p_submission_id": submission_id,
