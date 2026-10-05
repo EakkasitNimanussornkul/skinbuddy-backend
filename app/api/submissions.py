@@ -14,10 +14,11 @@ waiting for review, and may upload at most UPLOADS_PER_HOUR images an hour.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from postgrest.exceptions import APIError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.services import image_upload, submission_service
 from app.core.services.ingredient_lookup import fetch_all_rows, load_ingredients
@@ -25,8 +26,8 @@ from app.core.services.rate_limit import SlidingWindowLimiter
 from app.core.services.rpc_errors import BodyHTTPException, http_error_for_rpc
 from app.core.services.token import get_admin_user_id, get_current_user_id
 from app.db.connection import supabase
-from app.schemas import (SUBMISSION_IMAGE_PATH, ApproveRequest, RejectRequest, SubmissionCreate,
-                         SubmissionEdit)
+from app.schemas import (SUBMISSION_IMAGE_PATH, ApproveRequest, CleanupImagesRequest, RejectRequest,
+                         SubmissionCreate, SubmissionEdit)
 
 router = APIRouter()
 
@@ -204,6 +205,34 @@ async def list_submissions_for_review(
         raise HTTPException(status_code=500, detail="Failed to fetch submissions.")
 
 
+@router.post("/admin/cleanup-images")
+async def cleanup_unused_images(body: Optional[CleanupImagesRequest] = None,
+                                admin_id: str = Depends(get_admin_user_id)):
+    """Deletes stored photos that nothing uses: uploads under submissions/ and
+    products/ last written at least older_than_hours ago (default 24) that no
+    product's image_url and no pending or approved submission points at.
+    Rejected submissions' photos count as unused, which also covers those
+    rejected before rejecting deleted the photo. dry_run (the default) deletes
+    nothing and reports what would go. No body means the defaults.
+
+    Answers {"checked", "unreferenced", "deleted", "failed", "dry_run", "paths"};
+    see image_upload.cleanup_unused_uploads. A batch that fails to delete is
+    counted in failed, not answered as an error.
+
+    Run by an admin, not on a timer: the code has no scheduler. The timed jobs
+    that exist, the notification endpoints, are triggered from outside and
+    guarded only by an optional CRON_SECRET (open when it is unset). A button
+    behind the admin login is simpler, cannot be called by anyone else, and
+    lets the admin see a dry run first."""
+    body = body or CleanupImagesRequest()
+    try:
+        return await run_in_threadpool(image_upload.cleanup_unused_uploads,
+                                       body.older_than_hours, body.dry_run)
+    except Exception as e:
+        print("POST /submissions/admin/cleanup-images error:", e)
+        raise HTTPException(status_code=500, detail="Failed to check the stored images.")
+
+
 @router.get("/admin/{submission_id}")
 async def get_submission_for_review(submission_id: str, admin_id: str = Depends(get_admin_user_id)):
     try:
@@ -227,11 +256,18 @@ async def edit_submission(submission_id: str, body: SubmissionEdit, admin_id: st
         if "ingredients" in edits:
             _refuse_unknown_ids(edits["ingredients"])
         previous = row.get("edited_payload") if isinstance(row.get("edited_payload"), dict) else {}
+        old_image = submission_service.merged_payload(row).get("image_path")
         res = (supabase.table("product_submissions")
                .update({"edited_payload": {**previous, **edits}})
                .eq("id", submission_id).eq("status", "pending").execute())
         if not res.data:            # reviewed between the read and the write
             raise _not_pending("no longer pending")
+        # A photo replaced by a new upload, or cleared, is deleted once the edit
+        # is saved, unless something else still uses it. This submission now
+        # points at its new photo, so the check no longer sees it holding the
+        # old one. A failure is printed and the edit still answers 200.
+        if "image_path" in edits and old_image and old_image != edits["image_path"]:
+            image_upload.delete_upload_if_unused(old_image, "PATCH /submissions/admin/{id}")
         return _review_detail(_load_submission(submission_id))
     except HTTPException:
         raise
@@ -275,14 +311,35 @@ async def reject_submission(submission_id: str, body: RejectRequest, admin_id: s
         row = _load_submission(submission_id)
         if row.get("status") != "pending":
             raise _not_pending(row.get("status"))
-        res = (supabase.table("product_submissions").update({
+        image_path = submission_service.merged_payload(row).get("image_path")
+        decision = {
             "status": "rejected",
             "review_notes": body.review_notes,
             "reviewed_by": admin_id,
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", submission_id).eq("status", "pending").execute())
+        }
+        if image_path:
+            # A rejected submission keeps no photo. Recorded in the same update
+            # as the status, by setting edited_payload.image_path to null; the
+            # user's payload is never changed. edited_payload's keys replace
+            # payload's, so the effective image_path is null from now on:
+            #   * GET /submissions/admin/{id} shows "submission": {..., "image_path": null}
+            #     and "has_edits": true, and the list's flags.has_photo is false;
+            #   * GET /submissions/mine shows no photo at all, so it is unchanged.
+            # Recorded even if the deletion below fails or is skipped because
+            # another submission or product uses the file: this submission no
+            # longer holds it, and the cleanup route deletes it once nothing does.
+            previous = row.get("edited_payload") if isinstance(row.get("edited_payload"), dict) else {}
+            decision["edited_payload"] = {**previous, "image_path": None}
+        res = (supabase.table("product_submissions").update(decision)
+               .eq("id", submission_id).eq("status", "pending").execute())
         if not res.data:
             raise _not_pending("no longer pending")
+        if image_path:
+            # After the status change, so this submission, now rejected, no
+            # longer counts as using the photo. A failure is printed; the reject
+            # still answers 200.
+            image_upload.delete_upload_if_unused(image_path, "POST /submissions/admin/{id}/reject")
         done = res.data[0]
         return {"id": done["id"], "status": done["status"],
                 "reviewed_at": done.get("reviewed_at"), "review_notes": done.get("review_notes")}

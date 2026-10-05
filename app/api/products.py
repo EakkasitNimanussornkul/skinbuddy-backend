@@ -555,6 +555,18 @@ def _require_product_uuid(product_id: str) -> str:
         raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
 
 
+def _current_image_url(product_id: str) -> Optional[str]:
+    """The product's image_url before an edit, so the photo it replaces can be
+    deleted afterwards. None if it cannot be read: the edit goes ahead, and
+    deleting the old photo is left to the cleanup route."""
+    try:
+        res = supabase.table("products").select("image_url").eq("id", product_id).limit(1).execute()
+        return res.data[0].get("image_url") if res.data else None
+    except Exception as e:
+        print("PATCH /products/{id}: could not read the current image_url:", e)
+        return None
+
+
 @router.patch("/{product_id}")
 async def update_product(product_id: str, body: ProductPatch, admin_id: str = Depends(get_admin_user_id)):
     """Admin edit of any product: admin_update_product() in migration 0013, one
@@ -570,9 +582,11 @@ async def update_product(product_id: str, body: ProductPatch, admin_id: str = De
     try:
         product_id = _require_product_uuid(product_id)
         patch = body.patch_fields()
+        old_image_url = None
         if "image_path" in patch:
             path = patch.pop("image_path")
             patch["image_url"] = image_upload.public_url(path) if path else None
+            old_image_url = _current_image_url(product_id)
         try:
             res = supabase.rpc("admin_update_product", {
                 "p_product_id": product_id,
@@ -581,6 +595,14 @@ async def update_product(product_id: str, body: ProductPatch, admin_id: str = De
             }).execute()
         except APIError as err:
             raise http_error_for_rpc(err, "PATCH /products/{id}")
+        # The photo replaced or cleared is deleted once the change is saved, but
+        # only if it was one of our uploads (never a seed or catalogue image or
+        # an external URL) and nothing else, such as the approved submission it
+        # came from, still uses it. A failure is printed; the PATCH answers 200.
+        if "image_url" in patch and old_image_url and old_image_url != patch["image_url"]:
+            old_path = image_upload.upload_path_of_url(old_image_url)
+            if old_path:
+                image_upload.delete_upload_if_unused(old_path, "PATCH /products/{id}")
         saved = res.data or {}
         detail = load_product_detail(product_id, admin_id) or {}
         return {**detail, "id": product_id, "slug": saved.get("slug"), "updated_at": saved.get("updated_at")}

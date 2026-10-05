@@ -32,19 +32,25 @@ backtrack, and every malformed body answers 422, never 500.
 Files are stored with the service-role client in the product-images bucket
 (migrations 0004/0005) under <folder>/<uuid>.<ext>, so an upload never
 overwrites another.
+
+Uploads are deleted again once nothing uses them (owner's decision,
+2026-10-06): see "Deleting uploads nothing uses" at the end of this module.
 """
 
 import io
 import uuid
 import warnings
-from typing import Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException, Request
 from PIL import Image, ImageOps
 from starlette.concurrency import run_in_threadpool
 
+from app.core.services.ingredient_lookup import fetch_all_rows
+from app.core.services.submission_service import merged_payload
 from app.db.connection import supabase
-from app.schemas import PRODUCT_IMAGE_PATH
+from app.schemas import PRODUCT_IMAGE_PATH, UPLOAD_PATH_IN_TEXT
 
 STORAGE_BUCKET = "product-images"
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -401,3 +407,169 @@ def store_image(data: bytes, ext: str, content_type: str, folder: str) -> dict:
     supabase.storage.from_(STORAGE_BUCKET).upload(
         path, data, {"content-type": content_type, "upsert": "false"})
     return {"image_path": path, "public_url": public_url(path)}
+
+
+# --- Deleting uploads nothing uses ------------------------------------------------
+#
+# The bucket is public, so a stored photo stays readable by anyone holding its
+# URL until it is deleted. An upload is deleted once nothing uses it:
+#   * POST /submissions/admin/{id}/reject deletes the rejected submission's photo;
+#   * PATCH /submissions/admin/{id} and PATCH /products/{id} delete the photo
+#     they replaced or cleared, after the change is saved;
+#   * POST /submissions/admin/cleanup-images deletes the rest: uploads never
+#     used by any submission, photos of submissions rejected before this
+#     existed, and any deletion above that failed.
+#
+# The one rule, checked immediately before every deletion: an upload is never
+# deleted while a product's image_url, or the effective image_path (payload
+# merged with edited_payload) of a submission that is not rejected, still
+# points at it. An approved submission therefore keeps its photo for as long as
+# the submission exists, even after its product's photo has been replaced.
+#
+# Only our uploads can ever be deleted: a key of the form
+# <submissions|products>/<uuid>.<jpg|png|webp>, exact case. The seed and
+# catalogue images (Products/<name>.png, products/<name>.png, <slug>.jpg) and
+# external URLs (Open Beauty Facts) never match that shape.
+#
+# A storage failure while deleting never fails the request that caused it: it
+# is printed (the app has no logging framework) and the request answers as it
+# would have. What it leaves behind, the cleanup route finds later.
+
+UPLOAD_FOLDERS = ("submissions", "products")
+LIST_PAGE_SIZE = 100            # objects per list_v2 page
+MAX_LIST_PAGES = 10_000         # a guard against a cursor that never ends
+REMOVE_BATCH_SIZE = 100         # keys per remove() call
+MAX_REPORTED_PATHS = 100        # paths named in the cleanup report
+
+
+def upload_path_of_url(url: Any) -> Optional[str]:
+    """The upload a product's image_url shows, when that URL is exactly what
+    public_url() builds for one of our uploads in our bucket; None for anything
+    else: a seed or catalogue image, an external URL, a URL into another
+    project or bucket, or one with a query string."""
+    if not isinstance(url, str):
+        return None
+    _, found, path = url.partition(f"/object/public/{STORAGE_BUCKET}/")
+    if not found or not PRODUCT_IMAGE_PATH.fullmatch(path):
+        return None
+    return path if public_url(path) == url else None
+
+
+def referenced_upload_paths() -> Set[str]:
+    """Every upload path still in use: any found in a product's image_url, and
+    the effective image_path of every submission that is not rejected.
+
+    Read generously on purpose, since a false "in use" only keeps a file: any
+    upload-shaped path anywhere in an image_url or image_path counts, and so
+    does every status other than rejected (pending and approved are the only
+    others today)."""
+    used: Set[str] = set()
+    products = fetch_all_rows(lambda: supabase.table("products").select("id, image_url").order("id"))
+    for row in products:
+        if isinstance(row.get("image_url"), str):
+            used.update(m.group(0) for m in UPLOAD_PATH_IN_TEXT.finditer(row["image_url"]))
+    submissions = fetch_all_rows(lambda: supabase.table("product_submissions")
+                                 .select("id, status, payload, edited_payload")
+                                 .neq("status", "rejected").order("id"))
+    for row in submissions:
+        path = merged_payload(row).get("image_path")
+        if isinstance(path, str):
+            used.add(path)
+            used.update(m.group(0) for m in UPLOAD_PATH_IN_TEXT.finditer(path))
+    return used
+
+
+def delete_upload_if_unused(path: Any, context: str) -> bool:
+    """Deletes one upload unless something still uses it; True if it was
+    deleted. Never raises: a failure, in the reference check or in storage, is
+    printed under context (the route's name) and nothing is deleted, so the
+    caller's own answer stands."""
+    if not isinstance(path, str) or not PRODUCT_IMAGE_PATH.fullmatch(path):
+        return False
+    try:
+        if path in referenced_upload_paths():
+            return False
+        removed = supabase.storage.from_(STORAGE_BUCKET).remove([path])
+        return bool(removed)
+    except Exception as e:
+        print(f"{context}: could not delete the unused image {path}:", e)
+        return False
+
+
+def _last_written(obj: Any) -> Optional[datetime]:
+    """The later of an object's created_at and updated_at, timezone-aware, or
+    None if neither is known (such an object is never treated as old)."""
+    times = [t for t in (getattr(obj, "created_at", None), getattr(obj, "updated_at", None))
+             if isinstance(t, datetime)]
+    if not times:
+        return None
+    return max(t if t.tzinfo else t.replace(tzinfo=timezone.utc) for t in times)
+
+
+def list_uploads() -> List[Tuple[str, Optional[datetime]]]:
+    """(key, last written) of every object under submissions/ and products/,
+    a page at a time.
+
+    list_v2, not list: list() matches its folder case-insensitively and answers
+    bare file names. Live, list("products") returns the seed images stored
+    under "Products/", with no way to tell which folder each came from. list_v2
+    matches the prefix exactly and returns each object's full key, which is
+    what remove() needs."""
+    bucket = supabase.storage.from_(STORAGE_BUCKET)
+    found: List[Tuple[str, Optional[datetime]]] = []
+    for folder in UPLOAD_FOLDERS:
+        cursor, seen = None, set()
+        for _ in range(MAX_LIST_PAGES):
+            options: Dict[str, Any] = {"prefix": f"{folder}/", "limit": LIST_PAGE_SIZE}
+            if cursor:
+                options["cursor"] = cursor
+            page = bucket.list_v2(options)
+            found.extend((obj.name, _last_written(obj)) for obj in page.objects)
+            cursor = page.nextCursor
+            if not page.hasNext or not cursor or cursor in seen:
+                break
+            seen.add(cursor)
+    return found
+
+
+def cleanup_unused_uploads(older_than_hours: int, dry_run: bool,
+                           now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Finds the uploads nothing uses that were last written at least
+    older_than_hours ago and, unless dry_run, deletes them in batches.
+
+    checked: objects listed under submissions/ and products/ (seed images
+    there included; they are never candidates). unreferenced: the uploads
+    found, all of which a dry run would delete. deleted: the ones storage
+    confirmed deleted. failed: the ones it did not, or a batch that raised. An
+    upload that came into use between the listing and its batch is skipped and
+    counted in neither. paths: the unreferenced uploads, sorted, at most
+    MAX_REPORTED_PATHS.
+
+    The age limit spares a photo whose submission form is still being filled
+    in: it is uploaded first and referenced only when the form is sent."""
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=older_than_hours)
+    objects = list_uploads()
+    used = referenced_upload_paths()
+    candidates = sorted({key for key, written in objects
+                         if PRODUCT_IMAGE_PATH.fullmatch(key) and written is not None
+                         and written <= cutoff and key not in used})
+    deleted = failed = 0
+    if not dry_run:
+        bucket = supabase.storage.from_(STORAGE_BUCKET)
+        for start in range(0, len(candidates), REMOVE_BATCH_SIZE):
+            batch = candidates[start:start + REMOVE_BATCH_SIZE]
+            try:
+                still_used = referenced_upload_paths()      # re-checked right before deleting
+                batch = [key for key in batch if key not in still_used]
+                if not batch:
+                    continue
+                removed = bucket.remove(batch)
+            except Exception as e:
+                print("POST /submissions/admin/cleanup-images: could not delete a batch:", e)
+                failed += len(batch)
+                continue
+            done = min(len(removed), len(batch)) if isinstance(removed, list) else 0
+            deleted += done
+            failed += len(batch) - done
+    return {"checked": len(objects), "unreferenced": len(candidates), "deleted": deleted,
+            "failed": failed, "dry_run": dry_run, "paths": candidates[:MAX_REPORTED_PATHS]}

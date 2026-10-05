@@ -360,3 +360,92 @@ def _fresh_upload_limiter():
     upload_limiter.reset()
     yield
     upload_limiter.reset()
+
+
+# --- Storage listing and removal, for deleting unused photos --------------------
+#
+# The fake storage above only records uploads. Deleting unused photos also needs
+# the bucket's contents: list_v2() (the listing the code uses, since list()
+# matches folders case-insensitively) and remove(). Objects live in
+# fake.storage.objects[bucket][key] = last-written time; an upload adds one,
+# and fake.storage.put() seeds one directly.
+#
+#   fake.storage.put("submissions/<uuid>.png", hours_old=48)
+#   fake.storage.remove_error = RuntimeError("storage down")    # remove() raises it
+#   fake.storage.removals    -> [(bucket, [keys]), ...], one entry per remove() call
+#   fake.storage.list_calls  -> [(bucket, options), ...], one entry per list_v2() call
+
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone  # noqa: E402
+
+from storage3.types import SearchV2Object, SearchV2Result  # noqa: E402
+
+FAKE_STORAGE_BUCKET = "product-images"
+
+
+def _fake_storage_init(self):
+    self.uploads = []
+    self.objects = {}           # {bucket: {key: last-written datetime}}
+    self.removals = []
+    self.list_calls = []
+    self.remove_error = None
+    self.list_error = None
+
+
+def _fake_storage_put(self, key, hours_old=0.0, bucket=FAKE_STORAGE_BUCKET):
+    written = _datetime.now(_timezone.utc) - _timedelta(hours=hours_old)
+    self.objects.setdefault(bucket, {})[key] = written
+    return key
+
+
+def _fake_storage_keys(self, bucket=FAKE_STORAGE_BUCKET):
+    return sorted(self.objects.get(bucket, {}))
+
+
+FakeStorage.__init__ = _fake_storage_init
+FakeStorage.put = _fake_storage_put
+FakeStorage.keys = _fake_storage_keys
+
+_record_upload = FakeBucket.upload
+
+
+def _fake_bucket_upload(self, path, data, options=None):
+    result = _record_upload(self, path, data, options)
+    self._owner.objects.setdefault(self._bucket, {})[path] = _datetime.now(_timezone.utc)
+    return result
+
+
+def _fake_bucket_list_v2(self, options=None):
+    """Like the real list-v2: keys starting with the prefix, exact case, sorted
+    by key, `limit` at a time (default 1000), the cursor being the last key
+    returned."""
+    options = dict(options or {})
+    self._owner.list_calls.append((self._bucket, options))
+    if self._owner.list_error is not None:
+        raise self._owner.list_error
+    prefix, limit, cursor = options.get("prefix", ""), options.get("limit", 1000), options.get("cursor")
+    stored = self._owner.objects.get(self._bucket, {})
+    keys = [k for k in sorted(stored) if k.startswith(prefix) and (cursor is None or k > cursor)]
+    page, more = keys[:limit], len(keys) > limit
+    return SearchV2Result(
+        hasNext=more, folders=[],
+        objects=[SearchV2Object(id=str(uuid.uuid4()), name=k, created_at=stored[k], updated_at=stored[k],
+                                metadata={}) for k in page],
+        nextCursor=page[-1] if more else None)
+
+
+def _fake_bucket_remove(self, paths):
+    """Like the real remove(): deletes the keys that exist, exact case, and
+    answers a list with one entry per object deleted."""
+    self._owner.removals.append((self._bucket, list(paths)))
+    if self._owner.remove_error is not None:
+        raise self._owner.remove_error
+    stored = self._owner.objects.get(self._bucket, {})
+    removed = [p for p in paths if p in stored]
+    for p in removed:
+        del stored[p]
+    return [{"name": p, "bucket_id": self._bucket} for p in removed]
+
+
+FakeBucket.upload = _fake_bucket_upload
+FakeBucket.list_v2 = _fake_bucket_list_v2
+FakeBucket.remove = _fake_bucket_remove

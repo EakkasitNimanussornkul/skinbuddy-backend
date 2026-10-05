@@ -1,8 +1,8 @@
 import re
 from uuid import UUID
 from functools import partial
-from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints,
-                      field_validator, model_validator)
+from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, StrictInt,
+                      StringConstraints, field_validator, model_validator)
 from typing import Annotated, Optional, Dict, List, Any, Literal
 
 from app.core.input_safety import check_public_url, clean_text
@@ -366,6 +366,9 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # an arbitrary object in the bucket.
 SUBMISSION_IMAGE_PATH = re.compile(rf"^submissions/{_UUID}\.(jpg|png|webp)$")
 PRODUCT_IMAGE_PATH = re.compile(rf"^(submissions|products)/{_UUID}\.(jpg|png|webp)$")
+# The same shape anywhere inside a longer text, such as a product's image_url
+# (a public URL that ends in the path). Used to find which uploads are still in use.
+UPLOAD_PATH_IN_TEXT = re.compile(rf"(submissions|products)/{_UUID}\.(jpg|png|webp)")
 
 
 def _http_url(value: str) -> str:
@@ -543,6 +546,21 @@ class ApproveRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     review_notes: Optional[_text(1000, 0, multiline=True)] = None
+
+
+# Ten years: far beyond any real use, and small enough that the cut-off time
+# cannot overflow a datetime.
+MAX_CLEANUP_HOURS = 24 * 365 * 10
+
+
+class CleanupImagesRequest(BaseModel):
+    """POST /submissions/admin/cleanup-images. dry_run must be a real JSON
+    boolean: a value pydantic would otherwise read as false ("no", 0) cannot
+    turn a report into a deletion."""
+    model_config = ConfigDict(extra="forbid")
+
+    older_than_hours: Annotated[StrictInt, Field(ge=1, le=MAX_CLEANUP_HOURS)] = 24
+    dry_run: StrictBool = True
 
 
 class IngredientMatchRequest(BaseModel):
