@@ -486,3 +486,13 @@ def test_upload_treats_pillows_bomb_warning_as_a_refusal(client, storage, monkey
     assert resp.status_code == 413
     assert resp.json() == {"detail": TOO_MANY_PIXELS}
     assert storage.storage.uploads == []
+
+
+def test_upload_with_no_photo_says_so_in_plain_words(client, storage):
+    """Returns HTTP 422 {"detail": "No photo was received. Please choose a photo and try
+    again."} when the multipart body has no "file" field, since the page shows this
+    text to the person uploading as it is, and stores nothing."""
+    resp = client.post("/submissions/images", files={"photo": ("a.png", b"x", "image/png")})
+    assert resp.status_code == 422
+    assert resp.json() == {"detail": "No photo was received. Please choose a photo and try again."}
+    assert storage.storage.uploads == []
