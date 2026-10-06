@@ -597,8 +597,10 @@ async def update_product(product_id: str, body: ProductPatch, admin_id: str = De
             raise http_error_for_rpc(err, "PATCH /products/{id}")
         # The photo replaced or cleared is deleted once the change is saved, but
         # only if it was one of our uploads (never a seed or catalogue image or
-        # an external URL) and nothing else, such as the approved submission it
-        # came from, still uses it. A failure is printed; the PATCH answers 200.
+        # an external URL) and nothing else still uses it: another product, or a
+        # pending submission. The approved submission this product came from
+        # no longer keeps it, now that the product no longer shows it (owner's
+        # decision, 2026-10-06). A failure is printed; the PATCH answers 200.
         if "image_url" in patch and old_image_url and old_image_url != patch["image_url"]:
             old_path = image_upload.upload_path_of_url(old_image_url)
             if old_path:

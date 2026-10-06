@@ -3,9 +3,9 @@ replaces or clears it (POST /submissions/admin/{id}/reject, PATCH
 /submissions/admin/{id}, PATCH /products/{id}).
 
 The database and the bucket are the in-memory fakes in tests/conftest.py. A
-photo is "in use" while a product's image_url or a pending or approved
-submission's effective image_path points at it; a storage failure never fails
-the request.
+photo is "in use" while a product's image_url or a pending submission's
+effective image_path points at it, or an approved submission's while the
+product it created still shows it; a storage failure never fails the request.
 """
 
 import copy
@@ -43,10 +43,10 @@ def payload(image_path=PHOTO, **overrides):
     return base
 
 
-def submission(sid, status="pending", image_path=PHOTO, edited=None):
+def submission(sid, status="pending", image_path=PHOTO, edited=None, product_id=None):
     return {"id": sid, "submitted_by": "user-1", "status": status, "payload": payload(image_path),
             "edited_payload": edited, "created_at": "2026-10-01T00:00:00+00:00", "updated_at": None,
-            "reviewed_at": None, "review_notes": None, "reviewed_by": None, "product_id": None,
+            "reviewed_at": None, "review_notes": None, "reviewed_by": None, "product_id": product_id,
             "submitter": {"display_name": "Kla"}}
 
 
@@ -98,6 +98,16 @@ def _apply_saved_image(fake):
         call.execute = execute_and_save
         return call
     fake.rpc = rpc
+
+
+def live_other(sid, status):
+    """Another submission naming PHOTO that still keeps it: a pending one, or an
+    approved one whose product (PROD_B_ID) still shows it. Returns (submission,
+    products)."""
+    if status == "approved":
+        return (submission(sid, status="approved", product_id=PROD_B_ID),
+                [product(PROD_B_ID, image_url=PUBLIC + PHOTO)])
+    return submission(sid, status=status), []
 
 
 def row_of(fake, sid):
@@ -155,10 +165,12 @@ def test_reject_deletes_the_admins_replacement_photo_and_keeps_other_edits(clien
 
 @pytest.mark.parametrize("other_status", ["pending", "approved"])
 def test_reject_keeps_a_photo_another_live_submission_uses(client, backend, other_status):
-    """Deletes nothing when another pending or approved submission's effective
-    image_path is the same photo; the reject still answers 200 and records
-    image_path null on the rejected row."""
-    fake = backend([submission(SUB_1), submission(SUB_2, status=other_status)], stored=[PHOTO])
+    """Deletes nothing when another pending submission's effective image_path is
+    the same photo, or another approved submission's whose product still shows
+    it; the reject still answers 200 and records image_path null on the
+    rejected row."""
+    other, products = live_other(SUB_2, other_status)
+    fake = backend([submission(SUB_1), other], products=products, stored=[PHOTO])
     assert client.post(f"/submissions/admin/{SUB_1}/reject", json={}).status_code == 200
     assert fake.storage.removals == []
     assert fake.storage.keys() == [PHOTO]
@@ -300,9 +312,11 @@ def test_submission_edit_replacing_an_earlier_replacement_deletes_that_one(clien
 
 @pytest.mark.parametrize("other_status", ["pending", "approved"])
 def test_submission_edit_keeps_an_old_photo_another_submission_uses(client, backend, other_status):
-    """Deletes nothing when the replaced photo is still another pending or
-    approved submission's image_path."""
-    fake = backend([submission(SUB_1), submission(SUB_2, status=other_status)], stored=[PHOTO, NEW_PHOTO])
+    """Deletes nothing when the replaced photo is still another pending
+    submission's image_path, or another approved submission's whose product
+    still shows it."""
+    other, products = live_other(SUB_2, other_status)
+    fake = backend([submission(SUB_1), other], products=products, stored=[PHOTO, NEW_PHOTO])
     assert client.patch(f"/submissions/admin/{SUB_1}", json={"image_path": NEW_PHOTO}).status_code == 200
     assert fake.storage.removals == []
     assert fake.storage.keys() == [PHOTO, NEW_PHOTO]
@@ -373,13 +387,19 @@ def test_product_edit_clearing_our_upload_deletes_it(client, backend):
     assert fake.storage.keys() == []
 
 
-def test_product_edit_keeps_a_photo_its_approved_submission_still_names(client, backend):
-    """Deletes nothing when the replaced photo is still the image_path of the
-    approved submission the product came from."""
-    fake = backend([submission(SUB_1, status="approved")], products=[product(image_url=PUBLIC + PHOTO)],
-                   stored=[PHOTO, NEW_PRODUCT_PHOTO])
+def test_product_edit_replacing_its_approved_submissions_photo_deletes_it(client, backend):
+    """Returns HTTP 200 and deletes the replaced photo even though it is still
+    the image_path of the approved submission the product came from: an
+    approved submission keeps its photo only while its product shows it. The
+    new photo stays, and the submission's row is unchanged."""
+    fake = backend([submission(SUB_1, status="approved", product_id=PROD_ID)],
+                   products=[product(image_url=PUBLIC + PHOTO)], stored=[PHOTO, NEW_PRODUCT_PHOTO])
     assert product_patch(client, image_path=NEW_PRODUCT_PHOTO).status_code == 200
-    assert fake.storage.removals == []
+    assert fake.store["products"][0]["image_url"] == PUBLIC + NEW_PRODUCT_PHOTO
+    assert fake.storage.removals == [(BUCKET, [PHOTO])]
+    assert fake.storage.keys() == [NEW_PRODUCT_PHOTO]
+    assert row_of(fake, SUB_1)["payload"]["image_path"] == PHOTO
+    assert row_of(fake, SUB_1)["edited_payload"] is None
 
 
 def test_product_edit_keeps_a_photo_another_product_uses(client, backend):
@@ -455,3 +475,125 @@ def test_product_edit_still_saves_when_storage_fails(client, backend):
     assert resp.status_code == 200
     assert resp.json()["updated_at"] == SAVED_AT
     assert fake.storage.removals == [(BUCKET, [PRODUCT_PHOTO])]
+
+
+# --- An approved submission keeps its photo only while its product shows it ------
+#
+# Owner's decision, 2026-10-06: a photo that came from an approved submission is
+# deleted once the product it created no longer shows it, unless another product,
+# a pending submission, or another approved submission whose product still shows
+# it uses it.
+
+PROD_C_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"      # in no products row
+
+
+def patch_product(client, pid, **fields):
+    return client.patch(f"/products/{pid}", json={"updated_at": LOADED_AT, **fields})
+
+
+def test_product_edit_clearing_its_approved_submissions_photo_deletes_it(client, backend):
+    """Returns HTTP 200 with the product's image_url cleared, and deletes the
+    photo that came from its approved submission: the submission still names
+    it, but its product no longer shows it."""
+    fake = backend([submission(SUB_1, status="approved", product_id=PROD_ID)],
+                   products=[product(image_url=PUBLIC + PHOTO)], stored=[PHOTO])
+    assert product_patch(client, image_path=None).status_code == 200
+    assert fake.store["products"][0]["image_url"] is None
+    assert fake.storage.removals == [(BUCKET, [PHOTO])]
+    assert fake.storage.keys() == []
+
+
+def test_product_edit_keeps_an_approved_photo_its_product_still_shows(client, backend):
+    """Returns HTTP 200 and deletes nothing when another product's photo is
+    replaced and the old photo is still shown by the product an approved
+    submission created."""
+    fake = backend([submission(SUB_1, status="approved", product_id=PROD_ID)],
+                   products=[product(image_url=PUBLIC + PHOTO), product(PROD_B_ID, image_url=PUBLIC + PHOTO)],
+                   stored=[PHOTO, NEW_PRODUCT_PHOTO])
+    assert patch_product(client, PROD_B_ID, image_path=NEW_PRODUCT_PHOTO).status_code == 200
+    assert fake.store["products"][1]["image_url"] == PUBLIC + NEW_PRODUCT_PHOTO
+    assert fake.storage.removals == []
+    assert set(fake.storage.keys()) == {PHOTO, NEW_PRODUCT_PHOTO}
+
+
+def test_product_edit_keeps_an_approved_photo_a_pending_submission_also_uses(client, backend):
+    """Returns HTTP 200 and deletes nothing when the product's photo, from its
+    approved submission, is replaced while a pending submission's image_path
+    names the same photo."""
+    fake = backend([submission(SUB_1, status="approved", product_id=PROD_ID), submission(SUB_2)],
+                   products=[product(image_url=PUBLIC + PHOTO)], stored=[PHOTO, NEW_PRODUCT_PHOTO])
+    assert product_patch(client, image_path=NEW_PRODUCT_PHOTO).status_code == 200
+    assert fake.storage.removals == []
+    assert set(fake.storage.keys()) == {PHOTO, NEW_PRODUCT_PHOTO}
+
+
+def test_product_edit_keeps_the_photo_of_an_approved_submission_with_no_product_id(client, backend):
+    """Returns HTTP 200 and deletes nothing when the replaced photo is named by
+    an approved submission whose product_id is null: with no product to check,
+    the photo is kept (approving sets product_id, so this should not occur)."""
+    fake = backend([submission(SUB_1, status="approved", product_id=None)],
+                   products=[product(image_url=PUBLIC + PHOTO)], stored=[PHOTO, NEW_PRODUCT_PHOTO])
+    assert product_patch(client, image_path=NEW_PRODUCT_PHOTO).status_code == 200
+    assert fake.storage.removals == []
+    assert set(fake.storage.keys()) == {PHOTO, NEW_PRODUCT_PHOTO}
+
+
+def test_product_edit_keeps_a_photo_two_approved_submissions_share_while_either_product_shows_it(client, backend):
+    """With two approved submissions naming the same photo, each product showing
+    it: replacing the first product's photo deletes nothing, since the second
+    product still shows it; clearing the second product's photo then deletes
+    it."""
+    fake = backend([submission(SUB_1, status="approved", product_id=PROD_ID),
+                    submission(SUB_2, status="approved", product_id=PROD_B_ID)],
+                   products=[product(image_url=PUBLIC + PHOTO), product(PROD_B_ID, image_url=PUBLIC + PHOTO)],
+                   stored=[PHOTO, NEW_PRODUCT_PHOTO])
+    assert patch_product(client, PROD_ID, image_path=NEW_PRODUCT_PHOTO).status_code == 200
+    assert fake.storage.removals == []
+    assert patch_product(client, PROD_B_ID, image_path=None).status_code == 200
+    assert fake.storage.removals == [(BUCKET, [PHOTO])]
+    assert fake.storage.keys() == [NEW_PRODUCT_PHOTO]
+
+
+def test_reject_deletes_a_photo_an_approved_submission_names_once_its_product_shows_another(client, backend):
+    """Returns HTTP 200 and deletes the rejected submission's photo when the only
+    other submission naming it is approved and its product now shows a
+    different photo."""
+    fake = backend([submission(SUB_1), submission(SUB_2, status="approved", product_id=PROD_ID)],
+                   products=[product(image_url=PUBLIC + NEW_PRODUCT_PHOTO)], stored=[PHOTO, NEW_PRODUCT_PHOTO])
+    assert client.post(f"/submissions/admin/{SUB_1}/reject", json={}).status_code == 200
+    assert fake.storage.removals == [(BUCKET, [PHOTO])]
+    assert fake.storage.keys() == [NEW_PRODUCT_PHOTO]
+
+
+def test_reject_deletes_a_photo_an_approved_submission_names_once_its_product_is_gone(client, backend):
+    """Returns HTTP 200 and deletes the rejected submission's photo when the only
+    other submission naming it is approved and its product no longer exists:
+    a missing product does not show the photo."""
+    fake = backend([submission(SUB_1), submission(SUB_2, status="approved", product_id=PROD_C_ID)],
+                   stored=[PHOTO])
+    assert client.post(f"/submissions/admin/{SUB_1}/reject", json={}).status_code == 200
+    assert fake.storage.removals == [(BUCKET, [PHOTO])]
+    assert fake.storage.keys() == []
+
+
+def test_in_use_check_keeps_a_photo_whose_submission_is_approved_between_its_reads(backend, monkeypatch):
+    """Deletes nothing when the pending submission naming the photo is approved,
+    and its product created showing the photo, between the in-use check's two
+    reads: submissions are read before products, so the photo is seen in use
+    either way."""
+    fake = backend([submission(SUB_1)], stored=[PHOTO])
+    real_fetch = image_upload.fetch_all_rows
+    reads = []
+
+    def fetch_then_approve(build_query):
+        rows = copy.deepcopy(real_fetch(build_query))       # what the database answered at that moment
+        reads.append(1)
+        if len(reads) == 1:                                  # approve_submission commits after the first read
+            row_of(fake, SUB_1).update(status="approved", product_id=PROD_ID)
+            fake.store["products"].append(product(image_url=PUBLIC + PHOTO))
+        return rows
+    monkeypatch.setattr(image_upload, "fetch_all_rows", fetch_then_approve)
+    assert image_upload.delete_upload_if_unused(PHOTO, "test") is False
+    assert len(reads) == 2
+    assert fake.storage.removals == []
+    assert fake.storage.keys() == [PHOTO]

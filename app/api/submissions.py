@@ -210,10 +210,13 @@ async def cleanup_unused_images(body: Optional[CleanupImagesRequest] = None,
                                 admin_id: str = Depends(get_admin_user_id)):
     """Deletes stored photos that nothing uses: uploads under submissions/ and
     products/ last written at least older_than_hours ago (default 24) that no
-    product's image_url and no pending or approved submission points at.
-    Rejected submissions' photos count as unused, which also covers those
-    rejected before rejecting deleted the photo. dry_run (the default) deletes
-    nothing and reports what would go. No body means the defaults.
+    product's image_url and no pending submission points at. An approved
+    submission's photo counts as used only while the product it created still
+    shows it, which also covers products whose photo was replaced before that
+    rule existed. Rejected submissions' photos count as unused, which also
+    covers those rejected before rejecting deleted the photo. dry_run (the
+    default) deletes nothing and reports what would go. No body means the
+    defaults.
 
     Answers {"checked", "unreferenced", "deleted", "failed", "dry_run", "paths"};
     see image_upload.cleanup_unused_uploads. A batch that fails to delete is

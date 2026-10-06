@@ -1,9 +1,10 @@
 """POST /submissions/admin/cleanup-images: deleting stored photos nothing uses.
 
 The bucket is the fake in tests/conftest.py, listed with list_v2 a page at a
-time. An upload is "unreferenced" when no product's image_url and no pending or
-approved submission's effective image_path points at it; only those last
-written at least older_than_hours ago are reported, and deleted unless dry_run.
+time. An upload is "unreferenced" when no product's image_url, no pending
+submission's effective image_path, and no approved submission's whose product
+still shows it points at it; only those last written at least older_than_hours
+ago are reported, and deleted unless dry_run.
 """
 
 import copy
@@ -16,6 +17,7 @@ BUCKET = "product-images"
 PUBLIC = "https://test-project.supabase.co/storage/v1/object/public/product-images/"
 URL = "/submissions/admin/cleanup-images"
 PROD_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+APPROVED_PROD_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
 
 def upload(n, folder="submissions", ext="png"):
@@ -25,7 +27,7 @@ def upload(n, folder="submissions", ext="png"):
 ORPHAN_OLD = upload(1)                       # never used, 48 h old: deleted
 ORPHAN_NEW = upload(2)                       # never used, 1 h old: a form still being filled in
 PENDING_PHOTO = upload(3)                    # a pending submission's payload
-APPROVED_PHOTO = upload(4)                   # an approved submission's edits
+APPROVED_PHOTO = upload(4)                   # an approved submission's edits; its product shows it
 REJECTED_PHOTO = upload(5)                   # only a rejected submission: deleted
 PRODUCT_PHOTO = upload(6, "products", "webp")   # a product's image_url
 PRODUCT_ORPHAN = upload(7, "products", "jpg")   # an admin upload never saved: deleted
@@ -34,21 +36,23 @@ SEED_UPPER = "Products/" + upload(8).split("/")[1]                # another fold
 ELSEWHERE = upload(9).split("/")[1]                                # bucket root
 
 
-def submission(sid, status, payload_image=None, edited=None):
+def submission(sid, status, payload_image=None, edited=None, product_id=None):
     return {"id": sid, "status": status, "payload": {"name": "N", "image_path": payload_image},
-            "edited_payload": edited}
+            "edited_payload": edited, "product_id": product_id}
 
 
 SUBMISSIONS = [
     submission("5ab00000-0000-0000-0000-000000000001", "pending", PENDING_PHOTO),
-    submission("5ab00000-0000-0000-0000-000000000002", "approved", None, {"image_path": APPROVED_PHOTO}),
+    submission("5ab00000-0000-0000-0000-000000000002", "approved", None, {"image_path": APPROVED_PHOTO},
+               APPROVED_PROD_ID),
     submission("5ab00000-0000-0000-0000-000000000003", "rejected", REJECTED_PHOTO),
     # The user's original photo, replaced by the admin's edit: no longer used.
     submission("5ab00000-0000-0000-0000-000000000004", "pending", ORPHAN_OLD, {"image_path": PENDING_PHOTO}),
 ]
 PRODUCTS = [{"id": PROD_ID, "image_url": PUBLIC + PRODUCT_PHOTO},
             {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "image_url": PUBLIC + "Products/Seed.png"},
-            {"id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "image_url": None}]
+            {"id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "image_url": None},
+            {"id": APPROVED_PROD_ID, "image_url": PUBLIC + APPROVED_PHOTO}]
 AGES = {ORPHAN_OLD: 48, ORPHAN_NEW: 1, PENDING_PHOTO: 48, APPROVED_PHOTO: 48, REJECTED_PHOTO: 48,
         PRODUCT_PHOTO: 48, PRODUCT_ORPHAN: 30, SEED_LOWER: 2000, SEED_UPPER: 2000, ELSEWHERE: 2000}
 MODULES = ("app.api.submissions", "app.core.services.submission_service",
@@ -86,9 +90,10 @@ def test_cleanup_dry_run_reports_and_deletes_nothing(client, backend):
 
 def test_cleanup_deletes_only_old_unreferenced_uploads(client, backend):
     """With {"dry_run": false}, deletes exactly the uploads over 24 h old that no
-    product and no pending or approved submission uses (a never-used upload,
-    one only a rejected submission names, a user's photo the admin replaced,
-    and an admin upload never saved to a product), and answers "deleted": 3.
+    product, no pending submission, and no approved submission whose product
+    still shows it uses (a never-used upload, one only a rejected submission
+    names, a user's photo the admin replaced, and an admin upload never saved
+    to a product), and answers "deleted": 3.
     Newer uploads, photos in use, seed images and anything outside
     submissions/ and products/ (exact case) all stay."""
     fake = backend()
@@ -235,3 +240,87 @@ def test_cleanup_is_refused_to_a_normal_user(client, backend):
     assert resp.status_code == 403
     assert resp.json() == {"detail": "Admin access required"}
     assert fake.storage.removals == [] and fake.storage.list_calls == []
+
+
+# --- An approved submission keeps its photo only while its product shows it ------
+
+REPLACED_PHOTO = upload(10)          # an approved submission's photo its product no longer shows
+SUB_A = "5ab00000-0000-0000-0000-00000000000a"
+SUB_B = "5ab00000-0000-0000-0000-00000000000b"
+MISSING_PROD_ID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"     # in no products row
+
+
+def test_cleanup_deletes_an_approved_photo_its_product_no_longer_shows(client, backend):
+    """With {"dry_run": false}, deletes an approved submission's photo once the
+    product it created shows a different one (replaced before or after this
+    rule), and keeps an approved submission's photo its product still shows:
+    answers {"checked": 3, "unreferenced": 1, "deleted": 1, "failed": 0,
+    "dry_run": false, "paths": [the replaced photo]}."""
+    fake = backend(ages={REPLACED_PHOTO: 48, APPROVED_PHOTO: 48, PRODUCT_PHOTO: 48},
+                   submissions=[submission(SUB_A, "approved", REPLACED_PHOTO, None, PROD_ID),
+                                submission(SUB_B, "approved", APPROVED_PHOTO, None, APPROVED_PROD_ID)],
+                   products=[{"id": PROD_ID, "image_url": PUBLIC + PRODUCT_PHOTO},
+                             {"id": APPROVED_PROD_ID, "image_url": PUBLIC + APPROVED_PHOTO}])
+    resp = client.post(URL, json={"dry_run": False})
+    assert resp.status_code == 200
+    assert resp.json() == {"checked": 3, "unreferenced": 1, "deleted": 1, "failed": 0, "dry_run": False,
+                           "paths": [REPLACED_PHOTO]}
+    assert fake.storage.removals == [(BUCKET, [REPLACED_PHOTO])]
+    assert set(fake.storage.keys()) == {APPROVED_PHOTO, PRODUCT_PHOTO}
+
+
+def test_cleanup_dry_run_reports_an_approved_photo_its_product_cleared(client, backend):
+    """With no body (a dry run), reports an approved submission's photo whose
+    product's image_url is now null in "paths", and deletes nothing."""
+    fake = backend(ages={REPLACED_PHOTO: 48},
+                   submissions=[submission(SUB_A, "approved", None, {"image_path": REPLACED_PHOTO}, PROD_ID)],
+                   products=[{"id": PROD_ID, "image_url": None}])
+    body = client.post(URL).json()
+    assert (body["unreferenced"], body["paths"], body["dry_run"]) == (1, [REPLACED_PHOTO], True)
+    assert fake.storage.removals == []
+
+
+def test_cleanup_deletes_an_approved_photo_whose_product_is_gone(client, backend):
+    """With {"dry_run": false}, deletes an approved submission's photo when its
+    product_id names no existing product: a missing product does not show the
+    photo."""
+    fake = backend(ages={REPLACED_PHOTO: 48}, products=[],
+                   submissions=[submission(SUB_A, "approved", REPLACED_PHOTO, None, MISSING_PROD_ID)])
+    body = client.post(URL, json={"dry_run": False}).json()
+    assert (body["unreferenced"], body["deleted"]) == (1, 1)
+    assert fake.storage.keys() == []
+
+
+def test_cleanup_keeps_an_approved_photo_a_pending_submission_also_names(client, backend):
+    """With {"dry_run": false}, keeps an approved submission's photo its product
+    no longer shows while a pending submission's image_path names the same
+    photo: "unreferenced": 0, "deleted": 0."""
+    fake = backend(ages={REPLACED_PHOTO: 48}, products=[{"id": PROD_ID, "image_url": PUBLIC + PRODUCT_PHOTO}],
+                   submissions=[submission(SUB_A, "approved", REPLACED_PHOTO, None, PROD_ID),
+                                submission(SUB_B, "pending", REPLACED_PHOTO)])
+    body = client.post(URL, json={"dry_run": False}).json()
+    assert (body["unreferenced"], body["deleted"]) == (0, 0)
+    assert fake.storage.keys() == [REPLACED_PHOTO]
+
+
+def test_cleanup_keeps_the_photo_of_an_approved_submission_with_no_product_id(client, backend):
+    """With {"dry_run": false}, keeps an approved submission's photo when its
+    product_id is null (there is no product to check): "unreferenced": 0,
+    "deleted": 0."""
+    fake = backend(ages={REPLACED_PHOTO: 48}, products=[],
+                   submissions=[submission(SUB_A, "approved", REPLACED_PHOTO, None, None)])
+    body = client.post(URL, json={"dry_run": False}).json()
+    assert (body["unreferenced"], body["deleted"]) == (0, 0)
+    assert fake.storage.keys() == [REPLACED_PHOTO]
+
+
+def test_cleanup_keeps_a_pending_submissions_photo_even_with_a_product_id(client, backend):
+    """With {"dry_run": false}, keeps a pending submission's photo even when the
+    row carries a product_id whose product shows another photo: only an
+    approved submission's photo depends on its product. "unreferenced": 0,
+    "deleted": 0."""
+    fake = backend(ages={REPLACED_PHOTO: 48}, products=[{"id": PROD_ID, "image_url": PUBLIC + PRODUCT_PHOTO}],
+                   submissions=[submission(SUB_A, "pending", REPLACED_PHOTO, None, PROD_ID)])
+    body = client.post(URL, json={"dry_run": False}).json()
+    assert (body["unreferenced"], body["deleted"]) == (0, 0)
+    assert fake.storage.keys() == [REPLACED_PHOTO]

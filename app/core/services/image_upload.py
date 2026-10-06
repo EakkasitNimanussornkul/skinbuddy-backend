@@ -421,10 +421,16 @@ def store_image(data: bytes, ext: str, content_type: str, folder: str) -> dict:
 #     existed, and any deletion above that failed.
 #
 # The one rule, checked immediately before every deletion: an upload is never
-# deleted while a product's image_url, or the effective image_path (payload
-# merged with edited_payload) of a submission that is not rejected, still
-# points at it. An approved submission therefore keeps its photo for as long as
-# the submission exists, even after its product's photo has been replaced.
+# deleted while something still uses it:
+#   * a product, whose image_url points at it;
+#   * a pending submission, whose effective image_path (payload merged with
+#     edited_payload) points at it;
+#   * an approved submission, but only while the product it created
+#     (product_submissions.product_id) still shows that photo. Once an admin
+#     replaces or clears the product's photo, the submission no longer keeps it
+#     (owner's decision, 2026-10-06), so PATCH /products/{id} deletes it and
+#     the cleanup route finds those replaced before this rule existed.
+# A rejected submission never keeps a photo.
 #
 # Only our uploads can ever be deleted: a key of the form
 # <submissions|products>/<uuid>.<jpg|png|webp>, exact case. The seed and
@@ -457,25 +463,49 @@ def upload_path_of_url(url: Any) -> Optional[str]:
 
 def referenced_upload_paths() -> Set[str]:
     """Every upload path still in use: any found in a product's image_url, and
-    the effective image_path of every submission that is not rejected.
+    the effective image_path of every pending submission. An approved
+    submission's photo is in use only while the product it created still shows
+    it; a rejected submission's never is.
+
+    An approved submission with a product_id adds nothing here, and that is the
+    rule, not a gap: its photo is protected exactly when its product's
+    image_url still shows it, and every product's image_url is counted below.
+    When that product has replaced or cleared the photo, or no longer exists
+    (it cannot be deleted through the API), nothing from this submission keeps
+    it. Two approved submissions naming one photo keep it while either one's
+    product shows it, for the same reason.
+
+    An approved submission with NO product_id keeps its photo. 0013's
+    approve_submission sets product_id in the same update that sets 'approved',
+    so this should not happen; but a row without it gives no product to check,
+    and keeping a file by mistake costs only storage, while deleting one by
+    mistake breaks a photo for good.
+
+    Submissions are read BEFORE products. Approving a submission creates its
+    product and marks it approved in one transaction, so if that commits
+    between the two reads, the submission was seen as pending (keeps its
+    photo) and the product is seen too. Read the other way round, the product
+    would be missed and the now-approved submission would not keep the photo.
 
     Read generously on purpose, since a false "in use" only keeps a file: any
     upload-shaped path anywhere in an image_url or image_path counts, and so
-    does every status other than rejected (pending and approved are the only
-    others today)."""
+    does every status other than approved and rejected (pending is the only
+    other today)."""
     used: Set[str] = set()
-    products = fetch_all_rows(lambda: supabase.table("products").select("id, image_url").order("id"))
-    for row in products:
-        if isinstance(row.get("image_url"), str):
-            used.update(m.group(0) for m in UPLOAD_PATH_IN_TEXT.finditer(row["image_url"]))
     submissions = fetch_all_rows(lambda: supabase.table("product_submissions")
-                                 .select("id, status, payload, edited_payload")
+                                 .select("id, status, product_id, payload, edited_payload")
                                  .neq("status", "rejected").order("id"))
     for row in submissions:
+        if row.get("status") == "approved" and row.get("product_id"):
+            continue            # kept only through its product's image_url, counted below
         path = merged_payload(row).get("image_path")
         if isinstance(path, str):
             used.add(path)
             used.update(m.group(0) for m in UPLOAD_PATH_IN_TEXT.finditer(path))
+    products = fetch_all_rows(lambda: supabase.table("products").select("id, image_url").order("id"))
+    for row in products:
+        if isinstance(row.get("image_url"), str):
+            used.update(m.group(0) for m in UPLOAD_PATH_IN_TEXT.finditer(row["image_url"]))
     return used
 
 
