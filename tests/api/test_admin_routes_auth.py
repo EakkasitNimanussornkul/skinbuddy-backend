@@ -21,6 +21,7 @@ ADMIN_ROUTES = [
     ("post", f"/submissions/admin/{SUB_ID}/reject"),
     ("patch", f"/products/{PROD_ID}"),
     ("post", f"/products/{PROD_ID}/image"),
+    ("post", "/submissions/admin/cleanup-images"),
 ]
 
 USER_ROUTES = [
