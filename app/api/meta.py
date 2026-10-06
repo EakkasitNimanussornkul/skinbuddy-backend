@@ -7,6 +7,7 @@ would refuse.
 
 from fastapi import APIRouter, HTTPException
 
+from app.core import consent
 from app.core.services import ingredient_lookup
 from app.schemas import CATEGORIES, CONCERN_TAGS
 
@@ -34,3 +35,13 @@ async def get_functional_groups():
     except Exception as e:
         print("GET /meta/functional-groups error:", e)
         raise HTTPException(status_code=500, detail="Failed to fetch functional groups.")
+
+
+# Public, so the /privacy and /terms pages, which anyone can open without
+# signing in (LINE's user data policy 2.4), can show the version the backend is
+# asking people to agree to without a copy that could drift. These are the same
+# constants GET /auth/me puts in `consent.current_terms_version` and
+# `current_health_version`; bumping one in app/core/consent.py changes both.
+@router.get("/policy-versions")
+async def get_policy_versions():
+    return {"terms_version": consent.TERMS_VERSION, "health_version": consent.HEALTH_CONSENT_VERSION}
