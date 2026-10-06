@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.concurrency import asynccontextmanager
 from app.api import health
 from app.api import auth
@@ -13,6 +13,9 @@ from app.api import notifications
 from app.api import meta
 from app.api import ingredients
 from app.api import submissions
+from app.api import consent
+from app.api import account_deletion
+from app.core.services.consent_gate import require_health_consent_for_checkin
 from app.core.services.rpc_errors import BodyHTTPException, body_http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -48,12 +51,17 @@ app.add_middleware(
 # Include the router
 app.include_router(health.router, prefix="/health", tags=["Health"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(account_deletion.router, prefix="/auth", tags=["auth"])
+app.include_router(consent.router, prefix="/consent", tags=["Consent"])
 app.include_router(quiz.router, prefix="/quiz", tags=["Quiz"])
 app.include_router(shelf.router, prefix="/shelf", tags=["Shelf"])
 app.include_router(products.router, prefix="/products", tags=["Products"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(routine.router, prefix="/routine", tags=["Routine"])
-app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
+# POST /analysis/log needs a current health consent. The gate is attached here, before the
+# route runs, so analysis.py stays untouched; it gates POST only (app/core/services/consent_gate.py).
+app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"],
+                   dependencies=[Depends(require_health_consent_for_checkin)])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 app.include_router(meta.router, prefix="/meta", tags=["Meta"])
 app.include_router(ingredients.router, prefix="/ingredients", tags=["Ingredients"])

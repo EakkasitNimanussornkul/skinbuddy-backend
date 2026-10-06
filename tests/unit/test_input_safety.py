@@ -87,8 +87,10 @@ def test_http_url_text_strips_surrounding_whitespace_only():
 
 def test_the_backend_never_fetches_a_user_supplied_url():
     """No route module or request-time service makes an outbound HTTP request except
-    LINE login (auth.py, line_service.py): the source links users submit are stored and
-    shown, never fetched, so the link rules are about what is published, not SSRF."""
+    LINE login (auth.py, line_service.py) and LINE account deletion
+    (account_deletion_service.py, which calls only fixed api.line.me addresses): the
+    source links users submit are stored and shown, never fetched, so the link rules
+    are about what is published, not SSRF."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[2] / "app"
     fetching = set()
@@ -98,7 +100,7 @@ def test_the_backend_never_fetches_a_user_supplied_url():
             fetching.add(path.name)
     # image_service.py is used only by the offline catalogue loaders (app/db), and
     # fetches only from its allow-listed host.
-    assert fetching == {"auth.py", "line_service.py", "image_service.py"}
+    assert fetching == {"auth.py", "line_service.py", "image_service.py", "account_deletion_service.py"}
 
 
 # --- Text -------------------------------------------------------------------------

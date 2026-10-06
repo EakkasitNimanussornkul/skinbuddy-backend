@@ -7,6 +7,7 @@ from app.db.repository.user_repo import user_repo
 from app.core.services.token import create_supabase_compatible_token
 from app.db.connection import supabase
 from app.core.services.token import get_current_user_id
+from app.core.consent import consent_object
 
 router = APIRouter()
 
@@ -76,7 +77,9 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
     user = supabase.table("users").select("*").eq("id", user_id).execute()
     if not user.data:
         raise HTTPException(status_code=404, detail="User not found")
-    return user.data[0]
+    # Every column the row has (the six consent columns included, once 0014 has run),
+    # plus the consent object the frontend branches on.
+    return {**user.data[0], "consent": consent_object(user.data[0])}
 
 # --- NEW: Express Skin Type Update Route ---
 @router.patch("/me")

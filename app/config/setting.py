@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     LINE_CHANNEL_ID: str
     LINE_CHANNEL_SECRET: str
     LINE_REDIRECT_URI: str
+    # Account deletion (POST /auth/me/delete) asks the user to sign in with LINE
+    # again and exchanges that fresh code. LINE requires the exchange to use the
+    # SAME redirect_uri as the authorize request, and LINE_REDIRECT_URI lands on
+    # the login callback, so deletion has its own URL. It must equal the
+    # frontend's VITE_LINE_DELETE_REDIRECT_URI exactly (dev value
+    # http://localhost:5173/account/delete/callback) and be listed in the
+    # Callback URL list of the LINE Login channel in the LINE console. While it
+    # is unset, POST /auth/me/delete answers 503 deletion_not_configured.
+    LINE_DELETE_REDIRECT_URI: Optional[str] = None
 
     # --- LINE Messaging API (push notifications: UC-21, UC-26) ---
     # Optional so the app still boots without messaging configured.
