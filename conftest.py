@@ -115,6 +115,18 @@ def _split_body(func):
     return " ".join(setup), checks
 
 
+def _test_name(nodeid):
+    """The function name plus its full parameter id, e.g. `test_x[a-b]`.
+
+    The parameter id is split off at the first "[" before splitting on "::",
+    because an id may itself contain "::" (an IPv6 URL such as http://[::1]/).
+    Splitting the whole node id on "::" cut such a case down to a bogus name
+    like `1]/']`. Before the "[" the only "::" are the path/class separators.
+    """
+    head, bracket, params = nodeid.partition("[")
+    return head.split("::")[-1] + bracket + params
+
+
 def _format_params(callspec):
     """Render a parametrised case as `name=value, name=value`."""
     parts = []
@@ -170,7 +182,7 @@ def pytest_runtest_logreport(report):
         _RESULTS.append({
             "nodeid": report.nodeid,
             "file": report.nodeid.split("::")[0],
-            "test": report.nodeid.split("::")[-1],
+            "test": _test_name(report.nodeid),
             "docstring": meta.get("docstring", ""),
             "params": meta.get("params", ""),
             "input_source": meta.get("input_source", ""),
