@@ -128,3 +128,24 @@ def test_update_me_reports_a_database_failure_as_a_500(
     resp = client.patch("/auth/me", json={"skin_type": "DSPT"})
     assert resp.status_code == 500
     assert "Database error" in resp.json()["detail"]
+
+
+# --- Privileged fields -------------------------------------------------------
+
+def test_update_me_ignores_a_role_sent_in_the_body(client, patch_supabase, as_user):
+    """Leaves the caller's role as 'user', and their id and line_id as they were, when
+    the body also carries "role": "admin" and other users columns, and stores only the
+    skin_type: no signed-in user can promote themselves through PATCH /auth/me."""
+    fake = patch_supabase({"users": [{**user_row(skin_type="ORNT"), "role": "user"}]}, "app.api.auth")
+    as_user("user-1")
+
+    resp = client.patch("/auth/me", json={"skin_type": "DSPT", "role": "admin",
+                                          "id": "someone-else", "line_id": "line-attacker"})
+
+    assert resp.status_code == 200
+    stored = fake.store["users"][0]
+    assert stored["role"] == "user"
+    assert stored["id"] == "user-1" and stored["line_id"] == "line-user-1"
+    assert stored["skin_type"] == "DSPT"
+    assert resp.json()["role"] == "user"
+
