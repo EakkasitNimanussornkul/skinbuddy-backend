@@ -1,6 +1,6 @@
 import re
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from app.db.connection import supabase
@@ -36,6 +36,19 @@ PRODUCT_INGREDIENTS_JOIN = (
 # A product row with its own sources (migration 0010: where its ingredient
 # list, price, image or description was seen) and its ingredients as above.
 PRODUCT_SELECT = "*, product_sources(claim, sources(*)), " + PRODUCT_INGREDIENTS_JOIN
+
+# The same join cut down to what GET /products/search?view=card reads: the match
+# score and its breakdown (name, good_for, bad_for, each ingredient's claim sources
+# and each concern's target_profile/severity/concern_title; sources only by whether
+# one exists) and the safety flags (name). No product_sources and no source bodies:
+# the card does not return them. Measured at 46% of PRODUCT_SELECT's bytes (audit
+# 2026-10-09 section 3). Add a column to scoring and this must follow; the live
+# comparison of default against card scores is what proves they still agree.
+CARD_PRODUCT_SELECT = (
+    "*, product_ingredients(ingredients(name, good_for, bad_for, "
+    "ingredient_sources(claim, sources(id)), "
+    "ingredient_concerns(target_profile, severity, concern_title, concern_sources(sources(id)))))"
+)
 
 # Ingredients come back in the order printed on the pack (migration 0013's
 # product_ingredients.position), with NULLs last. PostgREST orders an embedded
@@ -372,8 +385,12 @@ async def search_products(
     q: str = "", 
     min_price: Optional[int] = None, 
     max_price: Optional[int] = None, 
+    view: Optional[Literal["card"]] = None,
     user_id: Optional[str] = Depends(get_optional_user_id)
 ):
+    """`view=card` returns each product without its ingredient rows and source trees
+    (product_ingredients, product_sources) and adds ingredient_count; every other
+    field, the score included, is what the default returns. An unknown view is a 422."""
     try:
         user_skin_type = ""
         if user_id:
@@ -385,7 +402,8 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        query = in_pack_order(supabase.table("products").select(PRODUCT_SELECT))
+        query = in_pack_order(supabase.table("products").select(
+            CARD_PRODUCT_SELECT if view == "card" else PRODUCT_SELECT))
         if q:
             clean_q = postgrest_quote(q.strip())
             query = query.or_(
@@ -413,14 +431,19 @@ async def search_products(
             if lower_q and lower_q in (prod.get("name") or "").lower(): rank_priority = 1
             elif lower_q and lower_q in (prod.get("brand") or "").lower(): rank_priority = 2
 
-            enriched_products.append({
+            item = {
                 **prod,
                 **display_fields,
                 "has_conflict": len(display_fields["caution_reasons"]) > 0,
                 "top_ingredients": preview_names,
                 "slug": prod_slug,
                 "_rank": rank_priority
-            })
+            }
+            if view == "card":
+                item.pop("product_ingredients", None)
+                item.pop("product_sources", None)
+                item["ingredient_count"] = len(ings)
+            enriched_products.append(item)
 
         enriched_products.sort(key=lambda x: x["_rank"])
         for p in enriched_products: p.pop("_rank", None)
