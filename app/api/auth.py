@@ -73,7 +73,7 @@ async def line_login(payload: LineAuthRequest):
     }
 
 @router.get("/me")
-async def get_me(user_id: str = Depends(get_current_user_id)):
+def get_me(user_id: str = Depends(get_current_user_id)):
     user = supabase.table("users").select("*").eq("id", user_id).execute()
     if not user.data:
         raise HTTPException(status_code=404, detail="User not found")
@@ -83,7 +83,7 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
 
 # --- NEW: Express Skin Type Update Route ---
 @router.patch("/me")
-async def update_me(payload: UserUpdateRequest, user_id: str = Depends(get_current_user_id)):
+def update_me(payload: UserUpdateRequest, user_id: str = Depends(get_current_user_id)):
     try:
         response = supabase.table("users").update({
             "skin_type": payload.skin_type

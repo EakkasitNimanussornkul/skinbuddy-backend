@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.get("/")
-async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
+def get_user_shelf(user_id: str = Depends(get_current_user_id)):
     try:
         # Each product's ingredients in pack order, as on the product page.
         query = supabase.table("shelf_items") \
@@ -27,7 +27,7 @@ async def get_user_shelf(user_id: str = Depends(get_current_user_id)):
         raise HTTPException(status_code=500, detail="Failed to fetch shelf.")
 
 @router.post("/add")
-async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current_user_id)):
+def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current_user_id)):
     try:
         new_item = {
             "user_id": user_id,
@@ -50,7 +50,7 @@ async def add_to_shelf(item: ShelfItemCreate, user_id: str = Depends(get_current
         raise HTTPException(status_code=500, detail="Failed to add item to shelf.")
 
 @router.delete("/{item_id}")
-async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_user_id)):
+def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_user_id)):
     try:
         response = supabase.table("shelf_items").delete().eq("id", item_id).eq("user_id", user_id).execute()
         # An id that is unknown, or that belongs to someone else, matches no row.
@@ -66,7 +66,7 @@ async def delete_from_shelf(item_id: str, user_id: str = Depends(get_current_use
         raise HTTPException(status_code=500, detail="Failed to remove item from shelf.")
 
 @router.get("/analyze/{product_id}", response_model=AnalysisResponse)
-async def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
+def analyze_product_compatibility(product_id: str, user_id: str = Depends(get_current_user_id)):
     try:
         # Resolve the target first so an unknown product is refused as a 404
         # rather than analysed into a confident "safe" verdict. Previously
@@ -121,7 +121,7 @@ class ItemOpenRequest(BaseModel):
     pao: Optional[int] = None
 
 @router.patch("/{item_id}/open")
-async def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = Depends(get_current_user_id)):
+def mark_item_opened(item_id: str, req: ItemOpenRequest, user_id: str = Depends(get_current_user_id)):
     try:
         update_data = {
             "opened_date": req.opened_date,
@@ -151,7 +151,7 @@ class UpdateStatusRequest(BaseModel):
     archived_at: Optional[str] = None 
 
 @router.patch("/{item_id}/status")
-async def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: str = Depends(get_current_user_id)):
+def update_shelf_status(item_id: str, req: UpdateStatusRequest, user_id: str = Depends(get_current_user_id)):
     try:
         update_data = {
             "usage_state": req.usage_state

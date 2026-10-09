@@ -17,14 +17,11 @@ existed only strategy 1 and the final no-match return were ever executed.
 
 Called directly rather than through a route: these are about which row comes
 back for a given string, and the HTTP layer has nothing to do with that.
-asyncio.run rather than a plugin, since the helper is async and the suite has no
-async test support.
+The helper is a plain function (it runs in FastAPI's threadpool), so it is called as one.
 
 Docstrings state the expected output, and are lifted verbatim into the
 "Expected Unit Output" field of the generated Test Record.
 """
-
-import asyncio
 
 from app.api.products import resolve_product_record
 
@@ -46,7 +43,7 @@ ORDINARY = catalogue_row("id-ordinary", "The Ordinary", "Niacinamide 10% + Zinc 
 
 
 def resolve(identifier):
-    return asyncio.run(resolve_product_record(identifier))
+    return resolve_product_record(identifier)
 
 
 def seed(patch_supabase, products):

@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/search")
-async def search_ingredients(
+def search_ingredients(
     q: str = Query(..., min_length=1, max_length=60),
     limit: int = Query(8, ge=1, le=20),
 ):
@@ -22,7 +22,7 @@ async def search_ingredients(
 
 
 @router.post("/match")
-async def match_ingredients(body: IngredientMatchRequest):
+def match_ingredients(body: IngredientMatchRequest):
     try:
         if not body.names:
             return {"matches": []}

@@ -62,7 +62,7 @@ def _write(user_id: str, changes: dict) -> dict:
 
 
 @router.post("/terms")
-async def accept_terms(req: TermsConsentRequest, user_id: str = Depends(get_current_user_id)):
+def accept_terms(req: TermsConsentRequest, user_id: str = Depends(get_current_user_id)):
     if req.age_confirmed is not True:
         raise coded(422, "You must confirm that you are 18 or older to use SkinBuddy.", "age_not_confirmed")
     if req.terms_version != consent.TERMS_VERSION:
@@ -74,7 +74,7 @@ async def accept_terms(req: TermsConsentRequest, user_id: str = Depends(get_curr
 
 
 @router.post("/health")
-async def give_health_consent(req: HealthConsentRequest, user_id: str = Depends(get_current_user_id)):
+def give_health_consent(req: HealthConsentRequest, user_id: str = Depends(get_current_user_id)):
     if req.health_version != consent.HEALTH_CONSENT_VERSION:
         raise _stale_version("health information terms", consent.HEALTH_CONSENT_VERSION)
     row = _write(user_id, {"health_consent_at": _now(),
@@ -84,7 +84,7 @@ async def give_health_consent(req: HealthConsentRequest, user_id: str = Depends(
 
 
 @router.delete("/health")
-async def withdraw_health_consent(user_id: str = Depends(get_current_user_id)):
+def withdraw_health_consent(user_id: str = Depends(get_current_user_id)):
     row = _read_row(user_id)
     if consent.health_withdrawn(row):
         return consent.consent_object(row)       # already withdrawn: nothing to change

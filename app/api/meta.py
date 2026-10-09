@@ -29,7 +29,7 @@ async def get_concern_tags():
 # but every value is already public through GET /ingredients/search and every
 # product page, so an admin gate would protect nothing.
 @router.get("/functional-groups")
-async def get_functional_groups():
+def get_functional_groups():
     try:
         return {"functional_groups": ingredient_lookup.functional_groups()}
     except Exception as e:

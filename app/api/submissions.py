@@ -117,14 +117,15 @@ async def upload_submission_image(request: Request, user_id: str = Depends(get_c
                             headers={"Retry-After": str(retry_after)})
     data, ext, content_type = await image_upload.read_image_upload(request)
     try:
-        return image_upload.store_image(data, ext, content_type, "submissions")
+        # Synchronous storage upload (up to its 20 s timeout): off the event loop.
+        return await run_in_threadpool(image_upload.store_image, data, ext, content_type, "submissions")
     except Exception as e:
         print("POST /submissions/images error:", e)
         raise HTTPException(status_code=500, detail="Failed to store the image.")
 
 
 @router.post("", status_code=201)
-async def create_submission(body: SubmissionCreate, user_id: str = Depends(get_current_user_id)):
+def create_submission(body: SubmissionCreate, user_id: str = Depends(get_current_user_id)):
     try:
         payload = body.stored_payload()
         # A soft cap: two requests racing could both pass it, which is harmless.
@@ -147,7 +148,7 @@ async def create_submission(body: SubmissionCreate, user_id: str = Depends(get_c
 
 
 @router.get("/mine")
-async def get_my_submissions(user_id: str = Depends(get_current_user_id)):
+def get_my_submissions(user_id: str = Depends(get_current_user_id)):
     try:
         rows = fetch_all_rows(lambda: supabase.table("product_submissions")
                               .select("*, product:products(slug)")
@@ -175,7 +176,7 @@ async def get_my_submissions(user_id: str = Depends(get_current_user_id)):
 # --- Admin only ----------------------------------------------------------------
 
 @router.get("/admin")
-async def list_submissions_for_review(
+def list_submissions_for_review(
     status: Literal["pending", "approved", "rejected"] = Query("pending"),
     admin_id: str = Depends(get_admin_user_id),
 ):
@@ -238,7 +239,7 @@ async def cleanup_unused_images(body: Optional[CleanupImagesRequest] = None,
 
 
 @router.get("/admin/{submission_id}")
-async def get_submission_for_review(submission_id: str, admin_id: str = Depends(get_admin_user_id)):
+def get_submission_for_review(submission_id: str, admin_id: str = Depends(get_admin_user_id)):
     try:
         return _review_detail(_load_submission(submission_id))
     except HTTPException:
@@ -249,7 +250,7 @@ async def get_submission_for_review(submission_id: str, admin_id: str = Depends(
 
 
 @router.patch("/admin/{submission_id}")
-async def edit_submission(submission_id: str, body: SubmissionEdit, admin_id: str = Depends(get_admin_user_id)):
+def edit_submission(submission_id: str, body: SubmissionEdit, admin_id: str = Depends(get_admin_user_id)):
     """Saves only the fields sent, on top of earlier edits; the user's payload is
     never changed. An unsent field keeps the user's value."""
     try:
@@ -281,7 +282,7 @@ async def edit_submission(submission_id: str, body: SubmissionEdit, admin_id: st
 
 
 @router.post("/admin/{submission_id}/approve")
-async def approve_submission(submission_id: str, body: ApproveRequest, admin_id: str = Depends(get_admin_user_id)):
+def approve_submission(submission_id: str, body: ApproveRequest, admin_id: str = Depends(get_admin_user_id)):
     try:
         row = _load_submission(submission_id)
         image_path = submission_service.merged_payload(row).get("image_path")
@@ -314,7 +315,7 @@ async def approve_submission(submission_id: str, body: ApproveRequest, admin_id:
 
 
 @router.post("/admin/{submission_id}/reject")
-async def reject_submission(submission_id: str, body: RejectRequest, admin_id: str = Depends(get_admin_user_id)):
+def reject_submission(submission_id: str, body: RejectRequest, admin_id: str = Depends(get_admin_user_id)):
     try:
         row = _load_submission(submission_id)
         if row.get("status") != "pending":

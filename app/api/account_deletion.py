@@ -8,6 +8,7 @@ except the 401 from the login dependency.
 """
 
 from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from postgrest.exceptions import APIError
 
@@ -63,7 +64,9 @@ async def delete_my_account(req: DeleteAccountRequest, user_id: str = Depends(ge
         raise coded(503, "Account deletion is not configured yet.", "deletion_not_configured")
 
     # 1. Before LINE is touched: the code can be used once.
-    user = _load_user(user_id)
+    # The database calls are synchronous: each runs in a worker thread so the LINE calls
+    # below can stay awaited and the event loop is never held for a round trip.
+    user = await run_in_threadpool(_load_user, user_id)
     if user.get("role") == "admin":
         raise coded(409, ADMIN_MESSAGE, "admin_account")
 
@@ -77,10 +80,10 @@ async def delete_my_account(req: DeleteAccountRequest, user_id: str = Depends(ge
         raise coded(403, "That LINE account is not the one you are signed in with.", "line_account_mismatch")
 
     # 4. The point of no return: one database transaction.
-    result = _delete_in_database(user_id)
+    result = await run_in_threadpool(_delete_in_database, user_id)
 
     # 5-6. Nothing below can undo the deletion or fail the request.
-    service.delete_unused_photos(result.get("image_paths"))
+    await run_in_threadpool(service.delete_unused_photos, result.get("image_paths"))
     line_deauthorized = await service.deauthorize(line_token)
 
     return {"deleted": True, "line_deauthorized": line_deauthorized}

@@ -3,6 +3,7 @@ import uuid
 from typing import List, Dict, Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from postgrest.exceptions import APIError
+from starlette.concurrency import run_in_threadpool
 from app.db.connection import supabase
 from app.core.services.token import get_admin_user_id, get_current_user_id, get_optional_user_id
 from app.core import cache
@@ -314,7 +315,7 @@ def compute_baumann_compatibility(user_skin_type: str, ingredients: List[Dict[st
         "caution_reasons": caution_reasons,
     }
 
-async def resolve_product_record(identifier: str) -> dict or None:
+def resolve_product_record(identifier: str) -> dict or None:
     """Helper that finds a product whether passed a UUID, an exact slug, or a partial string."""
     clean_id = identifier.lower().strip()
     
@@ -376,7 +377,7 @@ def _load_full_record(product_id: str) -> Optional[dict]:
     return res.data[0] if res.data else None
 
 @router.get("/slug/{slug}")
-async def get_product_by_slug(
+def get_product_by_slug(
     slug: str, 
     user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 Extracts logged-in user
 ):
@@ -387,7 +388,7 @@ async def get_product_by_slug(
             if user_res.data and len(user_res.data) > 0:
                 user_skin_type = user_res.data[0].get("skin_type", "")
         
-        prod = await resolve_product_record(slug)
+        prod = resolve_product_record(slug)
         if prod:
             # "Similar products" is presented to the user as products "matched
             # with similar active ingredient profiles", so it has to actually
@@ -444,7 +445,7 @@ async def get_product_by_slug(
 
 
 @router.get("/search")
-async def search_products(
+def search_products(
     response: Response,
     q: str = "", 
     min_price: Optional[int] = None, 
@@ -515,7 +516,7 @@ async def search_products(
         raise HTTPException(status_code=500, detail="Failed to search products.")
 
 @router.get("/compare", response_model=CompareResponse)
-async def compare_two_products(
+def compare_two_products(
     product_a_id: str, 
     product_b_id: str,
     user_id: Optional[str] = Depends(get_optional_user_id) # 🌟 ADDED DEPENDENCY
@@ -527,8 +528,8 @@ async def compare_two_products(
             if user_res.data and len(user_res.data) > 0:
                 user_skin_type = user_res.data[0].get("skin_type", "")
 
-        prod_a = await resolve_product_record(product_a_id)
-        prod_b = await resolve_product_record(product_b_id)
+        prod_a = resolve_product_record(product_a_id)
+        prod_b = resolve_product_record(product_b_id)
 
         if not prod_a or not prod_b:
             raise HTTPException(status_code=404, detail="One or both products could not be resolved.")
@@ -623,7 +624,7 @@ def load_product_detail(product_id: str, user_id: Optional[str]) -> Optional[dic
 
 
 @router.get("/{product_id}")
-async def get_product_detail(product_id: str, user_id: Optional[str] = Depends(get_optional_user_id)):
+def get_product_detail(product_id: str, user_id: Optional[str] = Depends(get_optional_user_id)):
     try:
         data = load_product_detail(product_id, user_id)
         if data is None:
@@ -659,7 +660,7 @@ def _current_image_url(product_id: str) -> Optional[str]:
 
 
 @router.patch("/{product_id}")
-async def update_product(product_id: str, body: ProductPatch, admin_id: str = Depends(get_admin_user_id)):
+def update_product(product_id: str, body: ProductPatch, admin_id: str = Depends(get_admin_user_id)):
     """Admin edit of any product: admin_update_product() in migration 0013, one
     transaction. Only the fields sent change; ingredients and sources, when
     sent, replace the product's whole list. 409 {"detail": "stale"} when
@@ -717,10 +718,13 @@ async def upload_product_image(product_id: str, request: Request, admin_id: str 
     product_id = _require_product_uuid(product_id)
     data, ext, content_type = await image_upload.read_image_upload(request)
     try:
-        found = supabase.table("products").select("id").eq("id", product_id).limit(1).execute()
+        # Both calls are synchronous network I/O (the storage upload can take up to its
+        # 20 s timeout): off the event loop, so they cannot freeze every other request.
+        found = await run_in_threadpool(
+            lambda: supabase.table("products").select("id").eq("id", product_id).limit(1).execute())
         if not found.data:
             raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found.")
-        return image_upload.store_image(data, ext, content_type, "products")
+        return await run_in_threadpool(image_upload.store_image, data, ext, content_type, "products")
     except HTTPException:
         raise
     except Exception as e:

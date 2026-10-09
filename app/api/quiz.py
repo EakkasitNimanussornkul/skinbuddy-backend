@@ -6,7 +6,7 @@ from app.core.services.token import get_current_user_id
 router = APIRouter()
 
 @router.post("/save")
-async def save_quiz_results(
+def save_quiz_results(
     quiz_data: QuizResultCreate,
     user_id: str = Depends(get_current_user_id) 
 ):

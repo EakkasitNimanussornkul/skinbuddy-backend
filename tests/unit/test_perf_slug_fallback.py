@@ -10,8 +10,6 @@ select itself: it keeps only the listed columns, as the database would, and reco
 every query. tests/unit/test_product_resolution.py covers the resolution rules.
 """
 
-import asyncio
-
 from app.api.products import PRODUCT_SELECT, resolve_product_record
 from tests.conftest import FakeQuery, FakeSupabase
 
@@ -75,7 +73,7 @@ def test_a_typo_slug_resolves_through_the_narrow_scan_to_the_full_product(monkey
     fake = SelectAwareFake({"products": [ORDINARY, CERAVE, CERAVE_TWO]})
     monkeypatch.setattr(module, "supabase", fake)
 
-    found = asyncio.run(resolve_product_record("cerave-hydrating-facial-cleanzer"))
+    found = resolve_product_record("cerave-hydrating-facial-cleanzer")
 
     assert found["id"] == "id-cerave"
     assert found["product_ingredients"][0]["ingredients"]["name"] == "Ingredient of id-cerave"
@@ -98,7 +96,7 @@ def test_an_unknown_slug_reads_only_the_narrow_columns_and_returns_none(monkeypa
     fake = SelectAwareFake({"products": [ORDINARY, CERAVE]})
     monkeypatch.setattr(module, "supabase", fake)
 
-    assert asyncio.run(resolve_product_record("completely-unknown-thing")) is None
+    assert resolve_product_record("completely-unknown-thing") is None
 
     assert [columns for columns, _ in fake.log] == [PRODUCT_SELECT, NARROW]
     assert fake.log[0][1] == [("slug", "completely-unknown-thing")]
@@ -112,7 +110,7 @@ def test_an_exact_slug_is_answered_by_one_query_and_never_reaches_the_scan(monke
     fake = SelectAwareFake({"products": [ORDINARY, exact]})
     monkeypatch.setattr(module, "supabase", fake)
 
-    found = asyncio.run(resolve_product_record("cosrx-snail-mucin-essence"))
+    found = resolve_product_record("cosrx-snail-mucin-essence")
 
     assert found["id"] == "id-exact"
     assert len(fake.log) == 1
@@ -125,7 +123,7 @@ def test_the_scan_resolves_the_first_match_in_database_order_as_before(monkeypat
     fake = SelectAwareFake({"products": [ORDINARY, CERAVE_TWO, CERAVE]})
     monkeypatch.setattr(module, "supabase", fake)
 
-    found = asyncio.run(resolve_product_record("cerave hydrating facial"))
+    found = resolve_product_record("cerave hydrating facial")
 
     assert found["id"] == "id-cerave-two"
     assert fake.log[-1] == (PRODUCT_SELECT, [("id", "id-cerave-two")])
@@ -138,7 +136,7 @@ def test_a_name_scan_match_is_also_loaded_whole(monkeypatch):
     fake = SelectAwareFake({"products": [ORDINARY, CERAVE]})
     monkeypatch.setattr(module, "supabase", fake)
 
-    found = asyncio.run(resolve_product_record("hydratingfacialcleanser"))
+    found = resolve_product_record("hydratingfacialcleanser")
 
     assert found["id"] == "id-cerave" and found["product_ingredients"]
     assert fake.log[-1] == (PRODUCT_SELECT, [("id", "id-cerave")])
