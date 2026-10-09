@@ -342,9 +342,12 @@ async def resolve_product_record(identifier: str) -> dict or None:
     except Exception:
         pass
 
-    # 2. Check exact slug or normalized name matches across up to 2000 items
+    # 2. Check exact slug or normalized name matches across up to 2000 items. Only the
+    # columns the matching reads are fetched (the full ingredient tree of every product
+    # was the cost of an unknown slug, audit 2026-10-09 finding 4); the one product that
+    # matches is then loaded whole, by id.
     clean_target = re.sub(r'[^a-z0-9]', '', clean_id)
-    res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).limit(2000).execute()
+    res = supabase.table("products").select("id, brand, name").limit(2000).execute()
     
     words = [w for w in clean_id.replace("-", " ").split() if len(w) > 2]
     
@@ -356,15 +359,21 @@ async def resolve_product_record(identifier: str) -> dict or None:
         clean_name = re.sub(r'[^a-z0-9]', '', name.lower())
         
         if clean_target in [clean_prod, clean_name] or clean_prod in clean_target or clean_target in clean_prod:
-            return prod
+            return _load_full_record(prod["id"])
 
     # 3. Fuzzy keyword match fallback
     if words:
         for prod in (res.data or []):
             full_text = f"{prod.get('brand', '')} {prod.get('name', '')}".lower()
             if all(w in full_text for w in words[:3]):
-                return prod
+                return _load_full_record(prod["id"])
     return None
+
+
+def _load_full_record(product_id: str) -> Optional[dict]:
+    """The product with its whole tree, as resolve_product_record returns it."""
+    res = in_pack_order(supabase.table("products").select(PRODUCT_SELECT)).eq("id", product_id).limit(1).execute()
+    return res.data[0] if res.data else None
 
 @router.get("/slug/{slug}")
 async def get_product_by_slug(
