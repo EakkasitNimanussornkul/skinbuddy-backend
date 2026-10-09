@@ -572,8 +572,14 @@ async def compare_two_products(
         # A single analyze(target=A, comparison=[B]) call already captures every A<->B
         # pairwise/category clash in both rule orderings; the second call (empty
         # comparison) only adds B's own skin-type warnings, so nothing double-counts.
-        result_a = compatibility_service.analyze(prod_a["id"], user_id, [compatibility_service.normalize_product(prod_b)])
-        result_b = compatibility_service.analyze(prod_b["id"], user_id, [])
+        #
+        # Both products and the skin type are already in hand, so they are passed in
+        # rather than read again (audit 2026-10-09, finding 2: 9 calls down to 5).
+        result_a = compatibility_service.analyze(
+            prod_a["id"], user_id, [compatibility_service.normalize_product(prod_b)],
+            user_skin_type=user_skin_type, target_data=prod_a)
+        result_b = compatibility_service.analyze(
+            prod_b["id"], user_id, [], user_skin_type=user_skin_type, target_data=prod_b)
         # One card per clashing product, as on the shelf. Every pairwise clash
         # names product B, so this collapses them into one; result_b holds only
         # skin-type alerts, which pass through as they are.

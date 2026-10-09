@@ -536,8 +536,19 @@ def load_category_rules() -> List[dict]:
         supabase.table("category_conflict_rules").select("*, category_rule_sources(sources(*))").execute().data or []))
 
 
-def analyze(product_id: str, user_id: Optional[str], comparison_products: List[dict]) -> AnalysisResponse:
+_FETCH = object()   # "read it yourself", as opposed to None, which is a real answer for a skin type
+
+
+def analyze(product_id: str, user_id: Optional[str], comparison_products: List[dict],
+            *, user_skin_type: Any = _FETCH, target_data: Optional[dict] = None) -> AnalysisResponse:
     """Run the full compatibility analysis of a target product against a set.
+
+    `user_skin_type` and `target_data` are for a caller that has already read them:
+    GET /products/compare holds both products and the user's skin type, and passing
+    them saves three database calls. Left out (every other caller), analyze() reads
+    the user's skin type and the target product itself, as it always has.
+    `target_data` is a products row with product_ingredients(ingredients(*,
+    ingredient_concerns(...))) nested in it, as resolve_product_record returns.
 
     Checks performed:
       1. Baumann skin-type direct conflicts (target ingredient bad_for user type).
@@ -552,22 +563,24 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
     # RAISES on zero rows (PGRST116), so an unknown user or product turned into
     # a 500 at whichever handler called this. Reading a list lets a missing row
     # be the empty, meaningful answer it already is below. BE-DEF-07.
-    user_skin_type = None
-    if user_id:
-        user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
-        user_skin_type = user_res.data[0].get("skin_type") if user_res.data else None
+    if user_skin_type is _FETCH:
+        user_skin_type = None
+        if user_id:
+            user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
+            user_skin_type = user_res.data[0].get("skin_type") if user_res.data else None
 
     # 2. Target product metadata
-    target_res = (
-        supabase.table("products")
-        # ingredient_concerns explains the skin-type pass below; nothing else
-        # here reads it.
-        .select("*, product_ingredients(ingredients(*, ingredient_concerns(*, concern_sources(sources(*)))))")
-        .eq("id", product_id)
-        .limit(1)
-        .execute()
-    )
-    target_data = target_res.data[0] if target_res.data else None
+    if target_data is None:
+        target_res = (
+            supabase.table("products")
+            # ingredient_concerns explains the skin-type pass below; nothing else
+            # here reads it.
+            .select("*, product_ingredients(ingredients(*, ingredient_concerns(*, concern_sources(sources(*)))))")
+            .eq("id", product_id)
+            .limit(1)
+            .execute()
+        )
+        target_data = target_res.data[0] if target_res.data else None
 
     target_ingredient_ids = []
     target_groups: Dict[str, list] = {}
