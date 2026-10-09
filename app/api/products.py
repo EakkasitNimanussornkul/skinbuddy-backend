@@ -1,7 +1,7 @@
 import re
 import uuid
 from typing import List, Dict, Any, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from postgrest.exceptions import APIError
 from app.db.connection import supabase
 from app.core.services.token import get_admin_user_id, get_current_user_id, get_optional_user_id
@@ -145,6 +145,10 @@ def filter_products(rows: List[dict], q: str, min_price: Optional[int], max_pric
 # PostgREST's max-rows; the old query asked for 100. ponytail: one page; past 1000
 # products the tree needs paging (and an order) like ingredient_lookup.fetch_all_rows.
 PRODUCT_TREE_LIMIT = 1000
+
+# The most products one search response carries: the old query's .limit(100), now the
+# default page size and the largest limit a caller may ask for. More come by offset.
+SEARCH_PAGE_MAX = 100
 
 
 def load_product_tree(view: Optional[str]) -> List[dict]:
@@ -432,15 +436,25 @@ async def get_product_by_slug(
 
 @router.get("/search")
 async def search_products(
+    response: Response,
     q: str = "", 
     min_price: Optional[int] = None, 
     max_price: Optional[int] = None, 
     view: Optional[Literal["card"]] = None,
+    limit: Optional[int] = Query(None, ge=1, le=SEARCH_PAGE_MAX),
+    offset: int = Query(0, ge=0),
     user_id: Optional[str] = Depends(get_optional_user_id)
 ):
     """`view=card` returns each product without its ingredient rows and source trees
     (product_ingredients, product_sources) and adds ingredient_count; every other
-    field, the score included, is what the default returns. An unknown view is a 422."""
+    field, the score included, is what the default returns. An unknown view is a 422.
+
+    Order: a name match first, then a brand match, then the rest (a category match);
+    within each, the database's own order, which is not defined by any column.
+
+    `limit` (1 to 100, default 100) and `offset` (default 0) cut a page out of that
+    order after filtering and ranking. X-Total-Count is how many products match
+    before the cut. Without them the response is what it always was."""
     try:
         user_skin_type = ""
         if user_id:
@@ -452,20 +466,26 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        products = filter_products(load_product_tree(view), q, min_price, max_price)[:100]
-
-        enriched_products = []
+        matching = filter_products(load_product_tree(view), q, min_price, max_price)
         lower_q = q.lower().strip()
 
-        for prod in products:
+        def rank_of(prod):
+            if lower_q and lower_q in (prod.get("name") or "").lower(): return 1
+            if lower_q and lower_q in (prod.get("brand") or "").lower(): return 2
+            return 3
+
+        # Ranked before the page is cut, so a page is a slice of the whole order and
+        # offsets mean the same thing on every call. sorted() is stable.
+        ranked = sorted(matching, key=rank_of)
+        response.headers["X-Total-Count"] = str(len(ranked))
+        page = ranked[offset:offset + (limit or SEARCH_PAGE_MAX)]
+
+        enriched_products = []
+        for prod in page:
             display_fields = compute_product_display_fields(prod, user_skin_type)
             ings = [item["ingredients"] for item in prod.get("product_ingredients", []) if item.get("ingredients")]
             preview_names = [ing["name"] for ing in ings[:3]]
             prod_slug = create_slug(prod.get("brand", ""), prod.get("name", ""))
-
-            rank_priority = 3
-            if lower_q and lower_q in (prod.get("name") or "").lower(): rank_priority = 1
-            elif lower_q and lower_q in (prod.get("brand") or "").lower(): rank_priority = 2
 
             item = {
                 **prod,
@@ -473,7 +493,6 @@ async def search_products(
                 "has_conflict": len(display_fields["caution_reasons"]) > 0,
                 "top_ingredients": preview_names,
                 "slug": prod_slug,
-                "_rank": rank_priority
             }
             if view == "card":
                 item.pop("product_ingredients", None)
@@ -481,8 +500,6 @@ async def search_products(
                 item["ingredient_count"] = len(ings)
             enriched_products.append(item)
 
-        enriched_products.sort(key=lambda x: x["_rank"])
-        for p in enriched_products: p.pop("_rank", None)
         return enriched_products
     except Exception as e:
         print("GET /products/search error:", e)

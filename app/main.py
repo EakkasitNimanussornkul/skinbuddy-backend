@@ -52,6 +52,7 @@ app.add_middleware(
     allow_credentials=True,   # Allows cookies/tokens
     allow_methods=["*"],      # ALLOWS ALL METHODS
     allow_headers=["*"],      # Allows all headers
+    expose_headers=["X-Total-Count"],   # a browser hides every other response header from scripts
 )
 
 # Include the router
