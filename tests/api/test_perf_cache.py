@@ -441,7 +441,7 @@ def test_an_ingredient_added_in_the_database_appears_after_sixty_seconds(client,
 
 # --- writes through this app clear the cache ---------------------------------------
 
-ADMIN_MODULES = ("app.api.products", "app.api.submissions", "app.core.services.submission_service",
+ADMIN_MODULES = ("app.api.products", "app.api.meta", "app.api.submissions", "app.core.services.submission_service",
                  "app.core.services.ingredient_lookup", "app.core.services.image_upload",
                  "app.core.services.token", "app.core.services.compatibility_service")
 
@@ -529,3 +529,58 @@ def test_a_refused_admin_write_still_clears_the_caches(client, admin_backend, ro
 
     assert stale == ("Dry Serum", ["Water"])
     assert fresh == ("Edited Name", ["Edited Water"])
+
+
+# --- GET /meta/facets is cached on its own and cleared with the rest ----------------
+
+def test_facets_are_read_once_a_minute_under_their_own_key(client, patch_backend, clock):
+    """Reads the products table once for two GET /meta/facets within 60 seconds, again
+    after 60 seconds, and once more for facets after a product search has filled the
+    product tree: the two do not share an entry."""
+    fake = patch_backend({"products": copy.deepcopy(CATALOGUE)}, "app.api.products", "app.api.meta")
+    reads = counting(fake)
+
+    client.get("/meta/facets")
+    client.get("/meta/facets")
+    assert reads["products"] == 1
+    clock[0] += 60
+    client.get("/meta/facets")
+    assert reads["products"] == 2
+    client.get("/products/search")
+    assert reads["products"] == 3
+    clock[0] += 60
+    client.get("/products/search")
+    client.get("/meta/facets")
+    assert reads["products"] == 5
+
+
+def test_approving_a_submission_makes_a_new_brand_appear_in_the_facets(client, admin_backend):
+    """Lists only the old brand in GET /meta/facets while the cache is warm and a new
+    brand has been stored, and lists the new brand on the first call after
+    POST /submissions/admin/{id}/approve."""
+    fake = admin_backend()
+    assert client.get("/meta/facets").json()["brands"] == ["Brand"]
+    edit_row(fake, "products", 0, brand="New Brand")
+
+    stale = client.get("/meta/facets").json()["brands"]
+    client.post(f"/submissions/admin/{SUB_ID}/approve", json={})
+    fresh = client.get("/meta/facets").json()["brands"]
+
+    assert stale == ["Brand"]
+    assert fresh == ["New Brand"]
+
+
+def test_editing_a_product_makes_a_new_brand_appear_in_the_facets(client, admin_backend):
+    """Lists only the old brand in GET /meta/facets while the cache is warm and a new
+    brand has been stored, and lists the new brand on the first call after
+    PATCH /products/{id}."""
+    fake = admin_backend()
+    assert client.get("/meta/facets").json()["brands"] == ["Brand"]
+    edit_row(fake, "products", 0, brand="New Brand")
+
+    stale = client.get("/meta/facets").json()["brands"]
+    client.patch(f"/products/{PROD_ID}", json={"updated_at": UPDATED_AT, "price_thb": 1})
+    fresh = client.get("/meta/facets").json()["brands"]
+
+    assert stale == ["Brand"]
+    assert fresh == ["New Brand"]

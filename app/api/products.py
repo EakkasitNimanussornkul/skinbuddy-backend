@@ -126,11 +126,33 @@ def _like_regex(pattern: str):
     return re.compile("".join(out), re.S)
 
 
-def filter_products(rows: List[dict], q: str, min_price: Optional[int], max_price: Optional[int]) -> List[dict]:
+def clean_category(value: Optional[str]) -> str:
+    """A category name as the Explore page's cleanString reads it, so the filter and
+    the page agree on what matches: lower-cased, trimmed, ONE trailing "s" dropped,
+    then the first "+" and the first "%20" turned into a space. "Cleansers",
+    "cleanser" and " CLEANSERS " are all "cleanser"; "Sun Care", "sun+care" and
+    "Sun%20Care" are all "sun care". No other alias exists ("Sunscreen" is not "Sun Care")."""
+    res = (value or "").lower().strip()
+    if res.endswith("s"):
+        res = res[:-1]
+    return res.replace("+", " ", 1).replace("%20", " ", 1)
+
+
+def _is_all(value: Optional[str]) -> bool:
+    """No filter: absent, empty, or the Explore page's "All" chip in any case."""
+    return value is None or value.strip().lower() in ("", "all")
+
+
+def filter_products(rows: List[dict], q: str, min_price: Optional[int], max_price: Optional[int],
+                    category: Optional[str] = None, brand: Optional[str] = None) -> List[dict]:
     """The rows the old database filter kept, in their order: `q` as
     name/brand/category ilike '%q%' (the % and _ wildcards and the backslash escape
     still apply, and PostgREST reads * as %), then the price bounds, a product with
-    no price failing either. Done here so the unfiltered product tree can be cached."""
+    no price failing either. Done here so the unfiltered product tree can be cached.
+
+    `category` keeps the products whose clean_category() equals the request's, and
+    `brand` those whose trimmed brand equals it ignoring case; "" , "All" and None
+    keep everything. A value nothing has keeps nothing. All the filters combine (AND)."""
     if q:
         like = _like_regex(("%" + q.strip() + "%").replace("*", "%"))
         rows = [r for r in rows if any(
@@ -140,6 +162,12 @@ def filter_products(rows: List[dict], q: str, min_price: Optional[int], max_pric
         rows = [r for r in rows if r.get("price_thb") is not None and r["price_thb"] >= min_price]
     if max_price is not None:
         rows = [r for r in rows if r.get("price_thb") is not None and r["price_thb"] <= max_price]
+    if not _is_all(category):
+        want = clean_category(category)
+        rows = [r for r in rows if r.get("category") and clean_category(r["category"]) == want]
+    if not _is_all(brand):
+        want = brand.strip().casefold()
+        rows = [r for r in rows if (r.get("brand") or "").strip().casefold() == want]
     return rows
 
 
@@ -451,6 +479,8 @@ def search_products(
     min_price: Optional[int] = None, 
     max_price: Optional[int] = None, 
     view: Optional[Literal["card"]] = None,
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
     limit: Optional[int] = Query(None, ge=1, le=SEARCH_PAGE_MAX),
     offset: int = Query(0, ge=0),
     user_id: Optional[str] = Depends(get_optional_user_id)
@@ -461,6 +491,11 @@ def search_products(
 
     Order: a name match first, then a brand match, then the rest (a category match);
     within each, the database's own order, which is not defined by any column.
+
+    `category` and `brand` filter with `q` and the prices, before ranking and paging:
+    category as the Explore page reads it (case, one trailing "s", "+" and "%20" do
+    not matter: Cleanser = Cleansers), brand ignoring case. Empty or "All" means no
+    filter; a value nothing has gives [] with X-Total-Count 0, not an error.
 
     `limit` (1 to 100, default 100) and `offset` (default 0) cut a page out of that
     order after filtering and ranking. X-Total-Count is how many products match
@@ -476,7 +511,7 @@ def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        matching = filter_products(load_product_tree(view), q, min_price, max_price)
+        matching = filter_products(load_product_tree(view), q, min_price, max_price, category, brand)
         lower_q = q.lower().strip()
 
         def rank_of(prod):
