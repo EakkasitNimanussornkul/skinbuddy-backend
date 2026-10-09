@@ -13,6 +13,7 @@ table holds a few hundred rows (384 on 2026-10-04).
 
 from typing import Any, Callable, Dict, List, Optional
 
+from app.core import cache
 from app.core.services.ingredient_names import clean_ingredient_text, ingredient_key, matched_alias
 from app.db.connection import supabase
 
@@ -33,10 +34,14 @@ def fetch_all_rows(build_query: Callable[[], Any]) -> List[Dict[str, Any]]:
 
 
 def load_ingredients() -> List[Dict[str, Any]]:
-    """id, name and functional_group of every ingredient, each with its key."""
-    rows = fetch_all_rows(
-        lambda: supabase.table("ingredients").select("id, name, functional_group").order("id"))
-    return [{**row, "_key": ingredient_key(row.get("name") or "")} for row in rows if row.get("name")]
+    """id, name and functional_group of every ingredient, each with its key.
+    The same for every caller, so cached for 60 s (app.core.cache): treat the
+    rows as read-only."""
+    def load():
+        rows = fetch_all_rows(
+            lambda: supabase.table("ingredients").select("id, name, functional_group").order("id"))
+        return [{**row, "_key": ingredient_key(row.get("name") or "")} for row in rows if row.get("name")]
+    return cache.get_or_load("ingredients", load)
 
 
 def matches_for(name: str, ingredients: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -111,7 +116,9 @@ def functional_groups() -> List[str]:
     """Every distinct ingredients.functional_group, exactly as stored, sorted.
     approve_submission() accepts a with_details functional_group only if it is
     one of these, compared as exact text."""
-    rows = fetch_all_rows(
-        lambda: supabase.table("ingredients").select("id, functional_group").order("id"))
-    return sorted({row["functional_group"] for row in rows
-                   if isinstance(row.get("functional_group"), str) and row["functional_group"].strip()})
+    def load():
+        rows = fetch_all_rows(
+            lambda: supabase.table("ingredients").select("id, functional_group").order("id"))
+        return sorted({row["functional_group"] for row in rows
+                       if isinstance(row.get("functional_group"), str) and row["functional_group"].strip()})
+    return cache.get_or_load("functional_groups", load)

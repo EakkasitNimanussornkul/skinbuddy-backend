@@ -133,10 +133,9 @@ def test_search_with_no_matching_products_returns_an_empty_list(client, patch_su
 # --- Ranking ------------------------------------------------------------------
 #
 # search_products assigns rank 1 to a query found in the product name, 2 to one
-# found only in the brand, and 3 to everything else, then sorts by it. The
-# PostgREST or_ filter that selects the rows is a no-op in the fake, so every
-# seeded product comes back and these tests see ordering alone - which is what
-# they are about. Selection is covered by the capture_or tests below.
+# found only in the brand (or, rank 3, only in the category), then sorts by it.
+# The rows the query selects are chosen by filter_products(), which matches the
+# query against name, brand and category, so each seeded product here matches.
 
 def priced(pid, brand, name, price_thb):
     row = product(pid, brand, name, "Serum", [GLYCERIN])
@@ -150,12 +149,14 @@ def names_from(resp):
 
 def test_search_ranks_a_name_match_above_a_brand_match_above_neither(client, patch_supabase):
     """Returns the product whose name contains the query first, the one whose
-    brand contains it second, and the one matching neither last.
+    brand contains it second, and the one matching only through its category last.
 
     Seeded in the opposite order, so passing requires the sort to have reordered
     them rather than the store to have been listed conveniently."""
+    category_only = priced("p-none", "The Ordinary", "Niacinamide 10% + Zinc 1%", 500)
+    category_only["category"] = "CeraVe-style Serum"
     patch_supabase({"products": [
-        priced("p-none", "The Ordinary", "Niacinamide 10% + Zinc 1%", 500),
+        category_only,
         priced("p-brand", "CeraVe", "Moisturising Lotion", 500),
         priced("p-name", "Generic Labs", "CeraVe Style Cleanser", 500),
     ]}, "app.api.products")
@@ -165,7 +166,7 @@ def test_search_ranks_a_name_match_above_a_brand_match_above_neither(client, pat
     assert names_from(resp) == [
         "CeraVe Style Cleanser",      # rank 1, name
         "Moisturising Lotion",        # rank 2, brand
-        "Niacinamide 10% + Zinc 1%",  # rank 3, neither
+        "Niacinamide 10% + Zinc 1%",  # rank 3, category only
     ]
 
 
@@ -251,64 +252,36 @@ def test_search_without_price_bounds_returns_every_product(client, patch_supabas
     assert len(resp.json()) == 3
 
 
-@pytest.fixture
-def capture_or(monkeypatch):
-    """Record the expression handed to PostgREST's or_().
-
-    The fake does not implement or_ — it answers through the no-op chain — so a
-    status-code assertion cannot tell a safe filter from an injected one. The
-    expression itself is the only observable that can, which is why BE-DEF-06's
-    guard asserts on it rather than on the response.
-
-    The class is taken off a live fake rather than imported: pytest loads
-    conftest under its own module name, so `import tests.conftest` yields a
-    second, unused copy of FakeQuery and patching it records nothing.
-    """
-    def _capture(fake):
-        seen = []
-        cls = type(fake.table("products"))
-        original = getattr(cls, "or_", None)
-
-        def spy(self, expr):
-            seen.append(expr)
-            return original(self, expr) if original else self
-
-        monkeypatch.setattr(cls, "or_", spy, raising=False)
-        return seen
-
-    return _capture
-
-
 @pytest.mark.parametrize("query", ["Vitamin C, 10%", "serum, cleanser", "a,b"])
-def test_search_keeps_a_comma_inside_the_quoted_filter_value(
-    client, patch_supabase, capture_or, query
-):
-    """Returns HTTP 200 for a query containing a comma, and sends exactly three
-    filter conditions, so the comma cannot terminate one condition and start
-    another (BE-DEF-06)."""
-    fake = patch_supabase({"products": []}, "app.api.products")
-    seen = capture_or(fake)
+def test_search_keeps_a_comma_inside_the_quoted_filter_value(client, patch_supabase, query):
+    """Returns HTTP 200 and exactly the product whose name contains a query that
+    holds a comma, and not a product that contains only one side of the comma, so
+    the comma is part of what is searched for and not a separator (BE-DEF-06)."""
+    left, right = query.split(",")[0], query.split(",")[1]
+    patch_supabase({"products": [
+        priced("p-both", "Brand", f"Pure {query} Blend", 500),
+        priced("p-left", "Brand", f"Only {left} here", 500),
+        priced("p-right", "Brand", f"Only{right} here", 500),
+    ]}, "app.api.products")
 
     resp = client.get("/products/search", params={"q": query})
+
     assert resp.status_code == 200
-
-    expr = seen[0]
-    assert expr.count("ilike") == 3
-    for column in ("name", "brand", "category"):
-        assert f'{column}.ilike."%{query}%"' in expr
+    assert [p["id"] for p in resp.json()] == ["p-both"]
 
 
-def test_search_escapes_a_quote_that_would_break_out_of_the_filter(
-    client, patch_supabase, capture_or
-):
-    """Returns the double quote backslash-escaped inside the filter expression,
-    so a query containing one cannot close the value and inject a condition."""
-    fake = patch_supabase({"products": []}, "app.api.products")
-    seen = capture_or(fake)
+def test_search_escapes_a_quote_that_would_break_out_of_the_filter(client, patch_supabase):
+    """Returns HTTP 200 and only the product whose name contains the double quote
+    the query holds, so a quote cannot close the value and add a condition."""
+    patch_supabase({"products": [
+        priced("p-quote", "Brand", 'Serum x"y Edition', 500),
+        priced("p-plain", "Brand", "Serum xy Edition", 500),
+    ]}, "app.api.products")
 
     resp = client.get("/products/search", params={"q": 'x"y'})
+
     assert resp.status_code == 200
-    assert 'name.ilike."%x\\"y%"' in seen[0]
+    assert [p["id"] for p in resp.json()] == ["p-quote"]
 
 
 # --- GET /products/compare ---------------------------------------------------

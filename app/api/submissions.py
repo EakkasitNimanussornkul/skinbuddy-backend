@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from postgrest.exceptions import APIError
 from starlette.concurrency import run_in_threadpool
 
+from app.core import cache
 from app.core.services import image_upload, submission_service
 from app.core.services.ingredient_lookup import fetch_all_rows, load_ingredients
 from app.core.services.rate_limit import SlidingWindowLimiter
@@ -300,6 +301,10 @@ async def approve_submission(submission_id: str, body: ApproveRequest, admin_id:
             }).execute()
         except APIError as err:
             raise http_error_for_rpc(err, "POST /submissions/admin/{id}/approve")
+        finally:
+            # Approval adds a product and may add ingredients: drop the cached
+            # product tree and ingredient list, whatever the answer was.
+            cache.clear()
         return res.data
     except HTTPException:
         raise

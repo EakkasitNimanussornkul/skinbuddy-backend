@@ -353,6 +353,16 @@ def patch_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_cache():
+    """The 60-second cache (app.core.cache) is process-wide; start and end every
+    test empty, so one test's fake catalogue is never served to the next."""
+    from app.core import cache
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_upload_limiter():
     """The upload rate limit (20 an hour per user) is process-wide; start every
     test with no uploads counted, so tests that upload do not use up each other's."""

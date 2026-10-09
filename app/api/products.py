@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from app.db.connection import supabase
 from app.core.services.token import get_admin_user_id, get_current_user_id, get_optional_user_id
+from app.core import cache
 from app.core.services import image_upload
 from app.core.services.rpc_errors import http_error_for_rpc
 from app.schemas import ProductDetail, CompareResponse, SharedIngredient, BAUMANN_PATTERN, ProductPatch
@@ -105,6 +106,55 @@ def postgrest_quote(value: str) -> str:
     crash.
     """
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _like_regex(pattern: str):
+    """A SQL LIKE pattern as a compiled regex: % any run, _ any one character,
+    backslash escapes the next character. Matched against lower-cased text, which
+    is what ilike does."""
+    out, i = [], 0
+    pattern = pattern.lower()
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        out.append(".*" if c == "%" else "." if c == "_" else re.escape(c))
+        i += 1
+    return re.compile("".join(out), re.S)
+
+
+def filter_products(rows: List[dict], q: str, min_price: Optional[int], max_price: Optional[int]) -> List[dict]:
+    """The rows the old database filter kept, in their order: `q` as
+    name/brand/category ilike '%q%' (the % and _ wildcards and the backslash escape
+    still apply, and PostgREST reads * as %), then the price bounds, a product with
+    no price failing either. Done here so the unfiltered product tree can be cached."""
+    if q:
+        like = _like_regex(("%" + q.strip() + "%").replace("*", "%"))
+        rows = [r for r in rows if any(
+            r.get(col) is not None and like.fullmatch(str(r[col]).lower())
+            for col in ("name", "brand", "category"))]
+    if min_price is not None:
+        rows = [r for r in rows if r.get("price_thb") is not None and r["price_thb"] >= min_price]
+    if max_price is not None:
+        rows = [r for r in rows if r.get("price_thb") is not None and r["price_thb"] <= max_price]
+    return rows
+
+
+# PostgREST's max-rows; the old query asked for 100. ponytail: one page; past 1000
+# products the tree needs paging (and an order) like ingredient_lookup.fetch_all_rows.
+PRODUCT_TREE_LIMIT = 1000
+
+
+def load_product_tree(view: Optional[str]) -> List[dict]:
+    """Every product with its ingredient tree, the same for every caller, so cached
+    for 60 s (app.core.cache) per select: the default and the card one. Rows are
+    shared between requests and must be treated as read-only. The database's own
+    order is kept, as the old unordered query returned it."""
+    select, name = (CARD_PRODUCT_SELECT, "card") if view == "card" else (PRODUCT_SELECT, "default")
+    return cache.get_or_load(("product_tree", name), lambda: (
+        in_pack_order(supabase.table("products").select(select)).limit(PRODUCT_TREE_LIMIT).execute().data or []))
 
 
 # good_for is free text, not "(<letter>)" markers like bad_for, so each phrase
@@ -402,21 +452,7 @@ async def search_products(
             user_res = supabase.table("users").select("skin_type").eq("id", user_id).limit(1).execute()
             user_skin_type = user_res.data[0].get("skin_type", "") if user_res.data else ""
 
-        query = in_pack_order(supabase.table("products").select(
-            CARD_PRODUCT_SELECT if view == "card" else PRODUCT_SELECT))
-        if q:
-            clean_q = postgrest_quote(q.strip())
-            query = query.or_(
-                f'name.ilike."%{clean_q}%",brand.ilike."%{clean_q}%",category.ilike."%{clean_q}%"'
-            )
-        
-        if min_price is not None:
-            query = query.gte("price_thb", min_price)
-        if max_price is not None:
-            query = query.lte("price_thb", max_price)
-
-        response = query.limit(100).execute()
-        products = response.data or []
+        products = filter_products(load_product_tree(view), q, min_price, max_price)[:100]
 
         enriched_products = []
         lower_q = q.lower().strip()
@@ -618,6 +654,10 @@ async def update_product(product_id: str, body: ProductPatch, admin_id: str = De
             }).execute()
         except APIError as err:
             raise http_error_for_rpc(err, "PATCH /products/{id}")
+        finally:
+            # The edit may have committed even when the answer was an error, so
+            # the cached product tree and ingredient list go either way.
+            cache.clear()
         # The photo replaced or cleared is deleted once the change is saved, but
         # only if it was one of our uploads (never a seed or catalogue image or
         # an external URL) and nothing else still uses it: another product, or a

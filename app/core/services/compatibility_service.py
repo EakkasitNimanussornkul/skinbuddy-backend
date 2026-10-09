@@ -1,6 +1,7 @@
 import unicodedata
 from typing import Any, List, Dict, Optional
 
+from app.core import cache
 from app.db.connection import supabase
 from app.schemas import AnalysisResponse, ConflictDetail, DuplicateMatch, SkinTypeReason, WarningAlert
 
@@ -522,6 +523,19 @@ def group_warnings_by_product(warnings: List[WarningAlert]) -> List[WarningAlert
 
 # --- Core analysis -----------------------------------------------------------
 
+def load_conflict_rules() -> List[dict]:
+    """conflict_rules with each rule's sources (in the same query, not one per rule).
+    The same for every caller, so cached for 60 s (app.core.cache); read-only."""
+    return cache.get_or_load("conflict_rules", lambda: (
+        supabase.table("conflict_rules").select("*, conflict_rule_sources(sources(*))").execute().data or []))
+
+
+def load_category_rules() -> List[dict]:
+    """category_conflict_rules with their sources; cached like load_conflict_rules()."""
+    return cache.get_or_load("category_conflict_rules", lambda: (
+        supabase.table("category_conflict_rules").select("*, category_rule_sources(sources(*))").execute().data or []))
+
+
 def analyze(product_id: str, user_id: Optional[str], comparison_products: List[dict]) -> AnalysisResponse:
     """Run the full compatibility analysis of a target product against a set.
 
@@ -622,9 +636,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
 
     # --- PASS 1: ingredient-to-ingredient (conflict_rules) ---
     if target_ingredient_ids and comparison_ingredient_ids:
-        # Each rule's sources come in the same query, not one query per rule.
-        specific_rules = supabase.table("conflict_rules").select("*, conflict_rule_sources(sources(*))").execute()
-        for rule in (specific_rules.data or []):
+        for rule in load_conflict_rules():
             id_a = rule.get("ingredient_a_id")
             id_b = rule.get("ingredient_b_id")
 
@@ -677,8 +689,7 @@ def analyze(product_id: str, user_id: Optional[str], comparison_products: List[d
 
     # --- PASS 2: functional-group / category (category_conflict_rules) ---
     if target_groups and comparison_groups:
-        rules_res = supabase.table("category_conflict_rules").select("*, category_rule_sources(sources(*))").execute()
-        for rule in (rules_res.data or []):
+        for rule in load_category_rules():
             rule_a = normalize_text_accents(rule.get("group_a"))
             rule_b = normalize_text_accents(rule.get("group_b"))
 
