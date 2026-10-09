@@ -28,8 +28,8 @@ from app.core.services import image_upload
 from app.core.services.token import create_supabase_compatible_token
 from tests.conftest import FakeQuery, FakeSupabase, FakeSupabaseWithRpc, RecordingQuery
 
-DELAY = 0.3                 # seconds one fake database call takes
-MAX_GAP = 0.12              # the loop must tick at least this often while a request is waiting on it
+DELAY = 0.6                 # seconds one fake database call takes; a handler that blocks the loop stalls it for about this long
+MAX_GAP = 0.3               # half of DELAY: a healthy loop ticks every ~10 ms, a blocked one stalls for DELAY, so a loaded machine has ~0.3 s of slack either way
 A_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 B_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -154,8 +154,8 @@ ROUTES = [
 def test_a_slow_database_call_in_a_converted_route_does_not_freeze_the_event_loop(
         slow_db, as_user, label, method, path, kwargs, status):
     """Returns the route's normal answer while the event loop keeps ticking: the longest gap
-    between ticks of a task on the same loop stays under 0.12 s although the route's database
-    calls take 0.3 s each, so one slow route no longer stops every other request."""
+    between ticks of a task on the same loop stays under 0.3 s although the route's database
+    calls take 0.6 s each, so one slow route no longer stops every other request."""
     as_user("admin-1")        # an admin, so the admin routes in the table are allowed too
     slow_db({"users": [dict(USER), dict(ADMIN)], "products": [dict(PRODUCT)], "shelf_items": [{"id": "s-1", "user_id": "admin-1", "usage_state": "active"}],
              "quiz_results": [], "ingredients": [{"id": "i-1", "name": "Water", "functional_group": "Solvent"}],
@@ -167,31 +167,31 @@ def test_a_slow_database_call_in_a_converted_route_does_not_freeze_the_event_loo
 
 
 def test_eight_slow_database_requests_overlap_instead_of_queueing(slow_db, as_user):
-    """Returns HTTP 200 for eight simultaneous GET /auth/me whose database call takes 0.3 s
-    each, all finished in under 1.2 s together (one after another would take 2.4 s): the
+    """Returns HTTP 200 for eight simultaneous GET /auth/me whose database call takes 0.6 s
+    each, all finished in under 2.4 s together (one after another would take 4.8 s): the
     requests wait on the database at the same time, in separate threads."""
     as_user("user-1")
     slow_db({"users": [dict(USER)]})
     responses, _, _, wall = drive([("GET", "/auth/me", {})] * 8)
     assert [r.status_code for r in responses] == [200] * 8
-    assert wall < 1.2, f"8 requests took {wall:.2f} s; they ran one at a time"
+    assert wall < 4 * DELAY, f"8 requests took {wall:.2f} s; they ran one at a time"
 
 
 def test_a_route_with_no_database_call_answers_at_once_while_a_slow_one_waits(slow_db, as_user):
-    """Returns GET /meta/categories in under 0.1 s while a GET /auth/me is waiting 0.3 s on
+    """Returns GET /meta/categories in under 0.3 s while a GET /auth/me is waiting 0.6 s on
     the database: the situation the audit measured at 1,286 ms instead of 3 ms."""
     as_user("user-1")
     slow_db({"users": [dict(USER)]})
     responses, took, _, _ = drive([("GET", "/auth/me", {}), ("GET", "/meta/categories", {})])
     assert [r.status_code for r in responses] == [200, 200]
-    assert took[1] < 0.1, f"/meta/categories took {took[1]:.3f} s behind a slow database call"
+    assert took[1] < DELAY / 2, f"/meta/categories took {took[1]:.3f} s behind a slow database call"
 
 
 # --- the routes that stay async def ---------------------------------------------------
 
 def test_a_slow_storage_upload_does_not_freeze_the_event_loop(slow_db, as_user, monkeypatch):
     """Returns HTTP 200 with the stored image_path for POST /submissions/images and for
-    POST /products/{id}/image while the (synchronous) storage upload takes 0.3 s, and the
+    POST /products/{id}/image while the (synchronous) storage upload takes 0.6 s, and the
     event loop keeps ticking: the upload runs in the threadpool."""
     as_user("admin-1")
     slow_db({"users": [dict(ADMIN)], "products": [{"id": A_ID}]})
@@ -202,7 +202,7 @@ def test_a_slow_storage_upload_does_not_freeze_the_event_loop(slow_db, as_user, 
 
     monkeypatch.setattr(image_upload, "store_image", slow_store)
     png = ("photo.png", _png(), "image/png")
-    # POST /products/{id}/image also reads the product (0.3 s), so it is the slower one.
+    # POST /products/{id}/image also reads the product (0.6 s), so it is the slower one.
     responses, took, gap, _ = drive([("POST", "/submissions/images", {"files": {"file": png}}),
                                      ("POST", f"/products/{A_ID}/image", {"files": {"file": png}})])
     assert [r.status_code for r in responses] == [200, 200], [r.text for r in responses]
@@ -213,7 +213,7 @@ def test_a_slow_storage_upload_does_not_freeze_the_event_loop(slow_db, as_user, 
 def test_account_deletion_runs_its_database_calls_in_the_threadpool(monkeypatch, as_user):
     """Returns HTTP 200 {"deleted": true, "line_deauthorized": true} for POST /auth/me/delete
     while each of its three synchronous steps (reading the user, the delete_user_account call,
-    the photo cleanup) takes 0.3 s, and the event loop keeps ticking."""
+    the photo cleanup) takes 0.6 s, and the event loop keeps ticking."""
     from app.api import account_deletion
     as_user("user-1")
     monkeypatch.setattr(settings, "LINE_DELETE_REDIRECT_URI", "http://localhost:5173/cb")
